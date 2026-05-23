@@ -236,7 +236,7 @@ async function loadStepFile(file) {
         while (explorer.More()) {
             const face        = oc.TopoDS.Face_1(explorer.Current());
             const location    = new oc.TopLoc_Location_1();
-            const triangulation = oc.BRep_Tool.Triangulation(face, location, 0);
+            const triangulation = oc.BRep_Tool.Triangulation(face, location);
 
             if (triangulation.IsNull()) {
                 explorer.Next();
