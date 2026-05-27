@@ -5,13 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>STEP Face Viewer – FaceID Mode</title>
 
-    <!--
-        coi-serviceworker: GitHub Pages では HTTP ヘッダを自由に設定できないため、
-        ServiceWorker で以下を注入し SharedArrayBuffer を有効化する。
-        Cross-Origin-Opener-Policy: same-origin
-        Cross-Origin-Embedder-Policy: require-corp
-        これにより opencascade.js の WASM マルチスレッド版が動作する。
-    -->
     <script type="importmap">
     {
         "imports": {
@@ -76,13 +69,10 @@
             white-space: nowrap;
         }
 
-        /* 左サイドパネル */
-        #sidebar {
+        /* 共通サイドパネルベース */
+        .sidebar-panel {
             position: absolute;
             top: 16px;
-            left: 16px;
-            width: 220px;
-            /* 画面の高さから上下の余白（16px × 2 = 32px）を引いた値を最大高さにする */
             max-height: calc(100vh - 32px); 
             background: rgba(20,20,28,0.92);
             border: 1px solid #333;
@@ -92,29 +82,40 @@
             flex-direction: column;
             gap: 14px;
             z-index: 10;
-            
-            /* 縦解像度が足りないときだけサイドバー内をスクロールさせる */
             overflow-y: auto; 
-            /* 横スクロールは絶対に発生させない */
             overflow-x: hidden; 
         }
 
-        /* 画面に馴染むカスタムスクロールバー（オプションですが推奨） */
-        #sidebar::-webkit-scrollbar {
+        /* カスタムスクロールバー */
+        .sidebar-panel::-webkit-scrollbar {
             width: 6px;
         }
-        #sidebar::-webkit-scrollbar-track {
+        .sidebar-panel::-webkit-scrollbar-track {
             background: transparent;
         }
-        #sidebar::-webkit-scrollbar-thumb {
+        .sidebar-panel::-webkit-scrollbar-thumb {
             background: #4b5563;
             border-radius: 3px;
         }
-        #sidebar::-webkit-scrollbar-thumb:hover {
+        .sidebar-panel::-webkit-scrollbar-thumb:hover {
             background: #7dd3fc;
         }
 
-        #sidebar h2 {
+        /* 左サイドパネル位置 */
+        #sidebar {
+            left: 16px;
+            width: 220px;
+        }
+
+        /* 右サイドパネル位置 */
+        #right-sidebar {
+            right: 16px;
+            width: 260px;
+            top: 110px; /* 情報ボックスと被らないように配置 */
+            max-height: calc(100vh - 130px);
+        }
+
+        .sidebar-panel h2 {
             font-size: 0.75rem;
             font-weight: 700;
             letter-spacing: 0.15em;
@@ -230,6 +231,39 @@
             z-index: 10;
             pointer-events: none;
         }
+
+        /* タグリスト行のスタイル */
+        .tag-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255,255,255,0.03);
+            padding: 6px;
+            border-radius: 6px;
+            border: 1px solid #2a2a35;
+        }
+        .tag-color-indicator {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            flex-shrink: 0;
+            cursor: pointer;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .tag-input {
+            flex-grow: 1;
+            background: #111;
+            border: 1px solid #444;
+            color: #fff;
+            font-size: 0.75rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            width: 100%;
+        }
+        .tag-input:focus {
+            border-color: #7dd3fc;
+            outline: none;
+        }
     </style>
 </head>
 <body>
@@ -239,8 +273,7 @@
 
     <div id="loading">Initializing OpenCascade...</div>
 
-    <!-- 左サイドパネル -->
-    <div id="sidebar">
+    <div id="sidebar" class="sidebar-panel">
         <h2>STEP Face Viewer</h2>
 
         <div class="ctrl-row">
@@ -275,7 +308,7 @@
         <button class="action-btn" id="undoButton">↩ Undo</button>
         
         <button class="action-btn" id="toggleEdgesButton">エッジ表示切替</button>
-        <button class="action-btn"id="toggleGridButton">グリッド非表示</button>
+        <button class="action-btn" id="toggleGridButton">グリッド非表示</button>
 
         <div class="ctrl-row">
             <label>視点切り替え</label>
@@ -299,20 +332,21 @@
         </div>
     </div>
 
-    <!-- 右上 情報 -->
+    <div id="right-sidebar" class="sidebar-panel">
+        <h2>Tag Information</h2>
+        <div class="ctrl-row" style="gap: 8px;" id="tagFieldsContainer">
+            </div>
+    </div>
+
     <div id="info-box">
         Face ID: <span id="faceId">—</span><br>
         Surface: <span id="meshName">—</span><br>
         Triangles: <span id="triCount">—</span>
     </div>
 
-    <!-- 下部モードバッジ -->
     <div id="mode-badge">⬡ FaceID MODE — opencascade.js</div>
 </div>
 
-
-    
-<!-- main.js は ES Module として読み込む -->
 <script type="module" src="./main.js"></script>
 
 </body>

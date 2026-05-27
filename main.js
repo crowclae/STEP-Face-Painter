@@ -37,7 +37,7 @@ const importColorsFile  = document.getElementById('importColorsFile');
 const toggleEdgesButton = document.getElementById('toggleEdgesButton');
 const toggleGridButton  = document.getElementById('toggleGridButton');
 
-// ★追加: 視点・センタリングボタンの取得
+// 視点・センタリングボタンの取得
 const viewPosXBtn = document.getElementById('viewPosX');
 const viewNegXBtn = document.getElementById('viewNegX');
 const viewPosYBtn = document.getElementById('viewPosY');
@@ -45,6 +45,58 @@ const viewNegYBtn = document.getElementById('viewNegY');
 const viewPosZBtn = document.getElementById('viewPosZ');
 const viewNegZBtn = document.getElementById('viewNegZ');
 const centerButton = document.getElementById('centerButton');
+
+// 右側タグメニュー用
+const tagFieldsContainer = document.getElementById('tagFieldsContainer');
+
+////////////////////////////////////////////////////////////
+// Preset Colors Configuration (左パレットと同じ10色)
+////////////////////////////////////////////////////////////
+const presetColors = [
+    { hex: '#e74c3c', name: 'Red' },
+    { hex: '#e67e22', name: 'Orange' },
+    { hex: '#f1c40f', name: 'Yellow' },
+    { hex: '#2ecc71', name: 'Green' },
+    { hex: '#3498db', name: 'Blue' },
+    { hex: '#9b59b6', name: 'Purple' },
+    { hex: '#1abc9c', name: 'Teal' },
+    { hex: '#ecf0f1', name: 'White' },
+    { hex: '#7f8c8d', name: 'Gray' },
+    { hex: '#b2bec3', name: 'Silver' }
+];
+
+////////////////////////////////////////////////////////////
+// 右側メニューのTag入力用UIを動的に生成
+////////////////////////////////////////////////////////////
+function initTagFields() {
+    tagFieldsContainer.innerHTML = '';
+    presetColors.forEach((preset, index) => {
+        const row = document.createElement('div');
+        row.className = 'tag-row';
+
+        // 色表示（クリックするとその色を選択できるショートカットに）
+        const indicator = document.createElement('div');
+        indicator.className = 'tag-color-indicator';
+        indicator.style.backgroundColor = preset.hex;
+        indicator.title = `パレットカラー ${index + 1}: ${preset.name} をブラシに適用`;
+        indicator.addEventListener('click', () => {
+            colorPicker.value = preset.hex;
+            console.log('Brush color changed via tag panel:', preset.hex);
+        });
+
+        // Tag入力欄
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'tag-input';
+        input.placeholder = `プリセット ${index + 1} のTag情報`;
+        input.id = `tag-input-${index}`;
+
+        row.appendChild(indicator);
+        row.appendChild(input);
+        tagFieldsContainer.appendChild(row);
+    });
+}
+initTagFields();
 
 ////////////////////////////////////////////////////////////
 // Scene
@@ -55,22 +107,20 @@ scene.background = new THREE.Color(0x1e1e1e);
 
 
 ////////////////////////////////////////////////////////////
-// Camera (修正版: OrthographicCamera)
+// Camera (OrthographicCamera)
 ////////////////////////////////////////////////////////////
 
-// 表示領域のサイズ（値が大きいほど広範囲が見えます。後でオブジェクトに合わせて自動調整されます）
 const viewSize = 300;
 const aspect = window.innerWidth / window.innerHeight;
 
 const camera = new THREE.OrthographicCamera(
-    -viewSize * aspect / 2, // Left
-     viewSize * aspect / 2, // Right
-     viewSize / 2,          // Top
-    -viewSize / 2,          // Bottom
-    0.1,                    // Near
-    100000                  // Far
+    -viewSize * aspect / 2, 
+     viewSize * aspect / 2, 
+     viewSize / 2,          
+    -viewSize / 2,          
+    0.1,                    
+    100000                  
 );
-// カメラの位置（パースが効かないため、位置の「距離」は見た目の大きさに影響せず「方向」のみに影響します）
 camera.position.set(150, 120, 150);
 
 
@@ -103,13 +153,6 @@ scene.add(dirLight);
 
 
 ////////////////////////////////////////////////////////////
-// Grid
-////////////////////////////////////////////////////////////
-
-//scene.add(new THREE.GridHelper(500, 50, 0x444444, 0x2a2a2a));
-
-
-////////////////////////////////////////////////////////////
 // Raycaster
 ////////////////////////////////////////////////////////////
 
@@ -130,11 +173,10 @@ let colorHistory    = [];
 const MAX_HISTORY   = 20;
 let showEdges       = true;
 let showGrid        = true;
-colorPicker.value = '#3498db';
+colorPicker.value = '#e74c3c';
 
 ////////////////////////////////////////////////////////////
 // opencascade.js 初期化
-// ★ローカルに配置したJSファイルとWASMファイルを動的インポート
 ////////////////////////////////////////////////////////////
 
 loading.style.display = 'block';
@@ -182,7 +224,6 @@ async function loadStepFile(file) {
         loading.style.display = 'block';
         loading.innerText = 'Reading STEP file...';
 
-        // 旧モデルの破棄
         if (currentModel) {
             scene.remove(currentModel);
             currentModel.traverse((child) => {
@@ -198,11 +239,9 @@ async function loadStepFile(file) {
         faceIdPerVertex = null;
         colorHistory    = [];
 
-        // ArrayBuffer → Uint8Array → 仮想 FS
         const fileData = new Uint8Array(await file.arrayBuffer());
         oc.FS.createDataFile('/', 'model.step', fileData, true, true, true);
 
-        // ---- STEP 読み込み ----
         loading.innerText = 'Parsing STEP geometry...';
 
         const reader     = new oc.STEPControl_Reader_1();
@@ -216,11 +255,9 @@ async function loadStepFile(file) {
         reader.TransferRoots(new oc.Message_ProgressRange_1());
         const shape = reader.OneShape();
 
-        // ---- メッシュ化 ----
         loading.innerText = 'Tessellating faces...';
         new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false);
 
-        // ---- フェイスごとに頂点・法線・インデックスを収集 ----
         loading.innerText = 'Building FaceID map...';
 
         const allPositions = [];  
@@ -306,7 +343,6 @@ async function loadStepFile(file) {
             throw new Error('No triangles found. STEP file may be empty or invalid.');
         }
 
-        // ---- Three.js BufferGeometry ----
         loading.innerText = 'Building Three.js geometry...';
 
         const geometry = new THREE.BufferGeometry();
@@ -328,7 +364,6 @@ async function loadStepFile(file) {
 
         geometry.setIndex(allIndices);
 
-        const normalAttr = geometry.attributes.normal;
         const hasZeroNormal = allNormals.some((v, i) =>
             i % 3 === 1 && allNormals[i-1] === 0 && v === 1 && allNormals[i+1] === 0
         );
@@ -337,7 +372,7 @@ async function loadStepFile(file) {
         }
 
         const vertexCount = allPositions.length / 3;
-        const defaultColor = new THREE.Color('#3498db'); 
+        const defaultColor = new THREE.Color('#ecf0f1'); 
         const colors = new Float32Array(vertexCount * 3);
         for (let i = 0; i < vertexCount; i++) {
             colors[i * 3]     = defaultColor.r;
@@ -497,13 +532,14 @@ document.querySelectorAll('.palette-btn').forEach((btn) => {
 
 
 ////////////////////////////////////////////////////////////
-// Undo
+// Undo (★バグ修正: slice() でメモリ参照を切断し、値を複製する)
 ////////////////////////////////////////////////////////////
 
 function saveHistory(mesh) {
-    const attr = mesh.geometry.attributes.color;
-    if (!attr) return;
-    colorHistory.push(new Float32Array(attr.array));
+    const attr = mesh?.geometry?.attributes?.color;
+    if (!attr || !attr.array) return;
+    // .slice()を呼ぶことで、参照元のメモリ空間とは独立したディープコピーを作成して保存します
+    colorHistory.push(attr.array.slice());
     if (colorHistory.length > MAX_HISTORY) colorHistory.shift();
 }
 
@@ -522,36 +558,66 @@ undoButton.addEventListener('click', () => {
 ////////////////////////////////////////////////////////////
 
 const gridHelper = new THREE.GridHelper(500, 50, 0x444444, 0x2a2a2a);
-gridHelper.name = 'gridHelper'; // ★これを追記（後から探し出せるように名前を付ける）
+gridHelper.name = 'gridHelper'; 
 scene.add(gridHelper);
 
 ////////////////////////////////////////////////////////////
-// Save / Load Color JSON
+// Save / Load Color JSON (★FaceIDベースのマッピング方式に改良)
 ////////////////////////////////////////////////////////////
 
 saveColorsButton.addEventListener('click', () => {
     if (!currentModel) { alert('モデルが読み込まれていません。'); return; }
     const mesh = currentModel.children[0];
-    const attr = mesh?.geometry?.attributes?.color;
-    if (!attr)  { alert('カラーデータがありません。'); return; }
+    const geometry = mesh?.geometry;
+    const colorAttr = geometry?.attributes?.color;
+    const faceIdAttr = geometry?.attributes?.faceId;
 
+    if (!colorAttr || !faceIdAttr) { alert('カラーデータまたはFaceIDデータがありません。'); return; }
+
+    // 1. FaceIDごとの色を格納するマップ（FaceID -> HEXカラー）を作成
+    const faceColorMap = {};
+    const vertexCount = colorAttr.count;
+
+    for (let i = 0; i < vertexCount; i++) {
+        const fId = Math.round(faceIdAttr.getX(i));
+        
+        // すでにこのFaceIDの色を記録してあればスキップ（高速化）
+        if (faceColorMap[fId] !== undefined) continue;
+
+        // 頂点の色(RGB)を取得してHEX文字列に変換
+        const r = colorAttr.getX(i);
+        const g = colorAttr.getY(i);
+        const b = colorAttr.getZ(i);
+        const color = new THREE.Color(r, g, b);
+        faceColorMap[fId] = "#" + color.getHexString();
+    }
+
+    // 2. 現在画面に入力されているTag情報を配列として取得
+    const tagsData = presetColors.map((_, index) => {
+        const inputEl = document.getElementById(`tag-input-${index}`);
+        return inputEl ? inputEl.value : '';
+    });
+
+    // 3. エクスポートデータ構造の構築
     const exportData = {
-        application:      'STEP Face Viewer – FaceID Mode',
-        timestamp:        Date.now(),
-        vertexColorCount: attr.array.length,
-        colors:           Array.from(attr.array),
+        application: "STEP Face Viewer – FaceID Mode",
+        timestamp: Date.now(),
+        fileName: mesh.userData.name || "model.step",
+        faceColors: faceColorMap, // ★頂点配列ではなく、[FaceID: 色] のペアを保存
+        tags: tagsData
     };
 
-    const blob = new Blob([JSON.stringify(exportData)], { type: 'application/json' });
-    const a    = Object.assign(document.createElement('a'), {
-        href:     URL.createObjectURL(blob),
+    // 4. ファイルダウンロード処理
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const a = Object.assign(document.createElement('a'), {
+        href: URL.createObjectURL(blob),
         download: 'step-colors.json',
     });
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
-    console.log('Color state saved.');
+    console.log('Color mapping by FaceID and tags saved successfully.');
 });
 
 importColorsFile.addEventListener('change', (e) => {
@@ -568,16 +634,53 @@ importColorsFile.addEventListener('change', (e) => {
         try {
             const data = JSON.parse(ev.target.result);
             const mesh = currentModel.children[0];
-            const attr = mesh?.geometry?.attributes?.color;
-            if (!attr) { alert('ジオメトリが無効です。'); return; }
-            if (data.vertexColorCount !== attr.array.length) {
-                alert('ポリゴン数が異なります。同じ STEP ファイルを使用してください。');
+            const geometry = mesh?.geometry;
+            const colorAttr = geometry?.attributes?.color;
+            const faceIdAttr = geometry?.attributes?.faceId;
+
+            if (!colorAttr || !faceIdAttr) { alert('ジオメトリが無効です。'); return; }
+
+            // 互換性チェック: 古い「頂点数一致チェック」の代わりにFaceID用データがあるか確認
+            if (!data.faceColors) {
+                alert('互換性のない形式のJSONファイルです（FaceIDマッピングが含まれていません）。');
                 return;
             }
+
+            // 1. 読み込み前の状態をUndo履歴に入れる
             saveHistory(mesh);
-            attr.array.set(data.colors);
-            attr.needsUpdate = true;
-            alert('カラーデータを復元しました。');
+
+            // 2. 画面上の全頂点をループし、JSON内のFaceIDに対応する色を1つずつ適用
+            const vertexCount = colorAttr.count;
+            const tempColor = new THREE.Color();
+            let appliedCount = 0;
+
+            for (let i = 0; i < vertexCount; i++) {
+                const fId = Math.round(faceIdAttr.getX(i));
+                const targetHex = data.faceColors[fId];
+
+                // もしJSON内にそのFaceIDの色情報が記録されていれば適用
+                if (targetHex !== undefined) {
+                    tempColor.set(targetHex);
+                    colorAttr.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
+                    appliedCount++;
+                }
+            }
+
+            // 変更を画面に反映
+            colorAttr.needsUpdate = true;
+
+            // 3. Tag情報の復元処理
+            if (data.tags && Array.isArray(data.tags)) {
+                data.tags.forEach((tagText, index) => {
+                    const inputEl = document.getElementById(`tag-input-${index}`);
+                    if (inputEl) {
+                        inputEl.value = tagText || '';
+                    }
+                });
+            }
+
+            alert('FaceIDマッピングに基づき、カラーデータとTag情報を復元しました。');
+            console.log(`Restored ${appliedCount} vertices using FaceID mapping.`);
         } catch (err) {
             console.error(err);
             alert('JSON 読み込み失敗: ' + err.message);
@@ -589,7 +692,7 @@ importColorsFile.addEventListener('change', (e) => {
 
 
 ////////////////////////////////////////////////////////////
-// Camera Fit (修正版: OrthographicCamera用)
+// Camera Fit (OrthographicCamera用)
 ////////////////////////////////////////////////////////////
 
 function fitCameraToObject(obj) {
@@ -598,10 +701,7 @@ function fitCameraToObject(obj) {
     const size   = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
 
-    // オブジェクトが画面に収まるように OrthographicCamera の表示範囲（ズーム）を調整
     const aspect = window.innerWidth / window.innerHeight;
-    
-    // 余裕を持たせるためのマージン（1.2倍）
     const baseSize = maxDim * 1.2;
 
     camera.left   = -baseSize * aspect / 2;
@@ -609,7 +709,6 @@ function fitCameraToObject(obj) {
     camera.top    =  baseSize / 2;
     camera.bottom = -baseSize / 2;
 
-    // 現在のカメラの向き（ベクトル）を維持したまま、中心位置を基準にカメラを後ろに下げる
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
     camera.position.copy(center).addScaledVector(dir, maxDim * 2);
 
@@ -640,40 +739,31 @@ if (toggleEdgesButton) {
 }
 
 ////////////////////////////////////////////////////////////
-// Toggle Grid Command（★これを新規追記）
+// Toggle Grid Command
 ////////////////////////////////////////////////////////////
 
 if (toggleGridButton) {
     toggleGridButton.addEventListener('click', () => {
-        // 状態を反転
         showGrid = !showGrid;
-        
-        // ボタンのテキストを更新
         toggleGridButton.innerText = showGrid ? 'グリッド非表示' : 'グリッド表示';
 
-        // シーン全体から名前をキーにグリッドオブジェクトを探す
         const grid = scene.getObjectByName('gridHelper');
         if (grid) {
-            grid.visible = showGrid; // 可視性を切り替え
+            grid.visible = showGrid; 
         }
     });
 }
 
 ////////////////////////////////////////////////////////////
-// ★追加: カメラ視点切り替え & センタリング
+// カメラ視点切り替え & センタリング
 ////////////////////////////////////////////////////////////
 
-// 現在のターゲットからの距離を維持して、指定した軸方向へカメラを移動する
 function setCameraDirection(axis, sign) {
     if (!controls) return;
 
-    // 現在のターゲット（注視点）を取得
     const target = controls.target.clone();
-    
-    // 現在のカメラとターゲットの距離を計算（距離を維持するため）
     const distance = camera.position.distanceTo(target);
 
-    // 新しいカメラ位置の計算
     const newPos = target.clone();
     if (axis === 'x') newPos.x += distance * sign;
     if (axis === 'y') newPos.y += distance * sign;
@@ -681,17 +771,15 @@ function setCameraDirection(axis, sign) {
 
     camera.position.copy(newPos);
 
-    // 真上・真下（+Y, -Y）を向いたときにカメラのUPベクトルがジンバルロックを起こさないよう補正
     if (axis === 'y') {
         camera.up.set(0, 0, sign === 1 ? -1 : 1);
     } else {
-        camera.up.set(0, 1, 0); // 通常はY軸が上
+        camera.up.set(0, 1, 0); 
     }
 
     controls.update();
 }
 
-// 各ボタンのイベントリスナー登録
 viewPosXBtn.addEventListener('click', () => setCameraDirection('x', 1));
 viewNegXBtn.addEventListener('click', () => setCameraDirection('x', -1));
 viewPosYBtn.addEventListener('click', () => setCameraDirection('y', 1));
@@ -699,43 +787,32 @@ viewNegYBtn.addEventListener('click', () => setCameraDirection('y', -1));
 viewPosZBtn.addEventListener('click', () => setCameraDirection('z', 1));
 viewNegZBtn.addEventListener('click', () => setCameraDirection('z', -1));
 
-////////////////////////////////////////////////////////////
-// センタリングボタンの処理（修正版）
-////////////////////////////////////////////////////////////
 centerButton.addEventListener('click', () => {
     if (!currentModel || !controls) return;
 
-    // 1. オブジェクト（グリッド以外）の中心座標を計算
     const box = new THREE.Box3().setFromObject(currentModel);
     const newCenter = box.getCenter(new THREE.Vector3());
 
-    // 2. 現在のターゲット（注視点）から新しい中心への移動量を計算
     const oldCenter = controls.target.clone();
     const offset = new THREE.Vector3().subVectors(newCenter, oldCenter);
 
-    // 3. カメラの位置とコントロールのターゲットを、同じ移動量だけ平行移動
     camera.position.add(offset);
     controls.target.copy(newCenter);
-
-    // コントロールを更新して画面に反映
     controls.update();
     
     console.log('Centered object while keeping current view angle.');
 });
 
 ////////////////////////////////////////////////////////////
-// Resize (修正版: OrthographicCamera用)
+// Resize (OrthographicCamera用)
 ////////////////////////////////////////////////////////////
 
 window.addEventListener('resize', () => {
     const aspect = window.innerWidth / window.innerHeight;
-    
-    // 現在の表示幅（高さ基準）を維持したまま左右の範囲を再計算
     const currentHeight = camera.top - camera.bottom;
     
     camera.left   = -currentHeight * aspect / 2;
     camera.right  =  currentHeight * aspect / 2;
-    // top と bottom は維持
     
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
