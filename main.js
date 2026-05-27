@@ -867,6 +867,86 @@ function fitCameraToObject(obj) {
 }
 
 ////////////////////////////////////////////////////////////
+// スクリーンショット機能（背景透過 PNG 保存）
+////////////////////////////////////////////////////////////
+
+const screenshotButton = document.getElementById('mode-badge');
+
+if (screenshotButton) {
+    screenshotButton.addEventListener('click', () => {
+        if (!currentModel) {
+            alert('モデルが読み込まれていません。');
+            return;
+        }
+
+        // --- 1. キャプチャ前の準備（ハイライトを一時的に非表示） ---
+        // マウスオーバーの赤枠や赤面が写り込まないように一時退避
+        const currentHoveredId = hoveredFaceId;
+        clearHighlight();
+
+        // 背景を透過させるために、シーンの背景を一瞬だけ null (透明) に設定
+        const originalBackground = scene.background;
+        scene.background = null;
+
+        // renderer の clearAlpha を 0 に設定（透過許可）
+        const originalClearAlpha = renderer.getClearAlpha();
+        renderer.setClearAlpha(0);
+
+        // --- 2. キャプチャ用の明示的なレンダリング ---
+        // 画面サイズそのままで描画バッファを確定させる
+        renderer.render(scene, camera);
+
+        // --- 3. データ抽出とダウンロード処理 ---
+        try {
+            // WebGL から DataURL (PNG) を取得
+            const dataURL = canvas.toDataURL('image/png');
+
+            // ファイル名用のタイムスタンプを作成
+            const now = new Date();
+            const timeStr = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            const modelName = currentModel.children[0]?.userData.name || "model";
+            const cleanName = modelName.replace(/\.[^/.]+$/, ""); // 拡張子削除
+            
+            const fileName = `screenshot_${cleanName}_${timeStr}.png`;
+
+            // 擬似リンクを作ってダウンロードを発火
+            const a = Object.assign(document.createElement('a'), {
+                href: dataURL,
+                download: fileName
+            });
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            console.log(`Screenshot saved successfully: ${fileName}`);
+        } catch (err) {
+            console.error('Screenshot failed:', err);
+            alert('スクリーンショットの保存に失敗しました。');
+        }
+
+        // --- 4. 状態の復元 ---
+        // シーン背景とアルファ設定を元に戻す
+        scene.background = originalBackground;
+        renderer.setClearAlpha(originalClearAlpha);
+
+        // 次のマウス移動で自然に再描画されるよう、一時退避したIDをもとにハイライトを復元する準備
+        // （即座に復元したい場合は、直前のマウス座標を保持して updateHighlight を叩くことも可能です）
+        hoveredFaceId = null; 
+    });
+
+    // ボタンにマウスが乗ったときのビジュアルフィードバック
+    screenshotButton.addEventListener('mouseenter', () => {
+        screenshotButton.style.background = 'rgba(30, 41, 59, 0.95)';
+        screenshotButton.style.borderColor = '#7dd3fc';
+    });
+    screenshotButton.addEventListener('mouseleave', () => {
+        screenshotButton.style.background = 'rgba(20,20,28,0.88)';
+        screenshotButton.style.borderColor = '#334';
+    });
+}
+
+
+////////////////////////////////////////////////////////////
 // Toggle Edges Command
 ////////////////////////////////////////////////////////////
 
