@@ -173,6 +173,8 @@ let colorHistory    = [];
 const MAX_HISTORY   = 20;
 let showEdges       = true;
 let showGrid        = true;
+let hoveredFaceId = null;       // 現在ホバーしているFaceID
+let highlightEdgeMesh = null;   // ハイライト表示用のラインメッシュ
 colorPicker.value = '#e74c3c';
 
 ////////////////////////////////////////////////////////////
@@ -461,6 +463,129 @@ function checkAndPaint(clientX, clientY, isFirstClick = false) {
     applyColorToFaceGroup(targetMesh, sameIdTris, colorPicker.value);
 }
 
+////////////////////////////////////////////////////////////
+// マウスオーバー時のハイライト処理（面とエッジの両方を強調）
+////////////////////////////////////////////////////////////
+
+// ハイライト表示用のオブジェクトを保持する変数（トップレベルのStateに追加・変更）
+let highlightGroup = null; // LineSegments から Group もしくは単一のコンテナに変更するため
+
+function updateHighlight(clientX, clientY) {
+    if (!currentModel || !faceGroupMap) return;
+
+    const rect = canvas.getBoundingClientRect();
+    mouse.x =  ((clientX - rect.left) / rect.width)  * 2 - 1;
+    mouse.y = -((clientY - rect.top)  / rect.height) * 2 + 1;
+
+    camera.updateProjectionMatrix();
+    raycaster.setFromCamera(mouse, camera);
+    
+    const intersects = raycaster.intersectObjects(currentModel.children, true);
+    const intersect = intersects.find(hit => hit.object.isMesh);
+    
+    if (!intersect) {
+        clearHighlight();
+        return;
+    }
+
+    const hitTriangle = intersect.faceIndex;
+    if (hitTriangle === undefined) return;
+
+    const geometry   = intersect.object.geometry;
+    const indexAttr  = geometry.index;
+    const faceIdAttr = geometry.attributes.faceId;
+
+    const vertexIndex = indexAttr.getX(hitTriangle * 3);
+    const faceIdVal   = Math.round(faceIdAttr.getX(vertexIndex));
+
+    if (hoveredFaceId === faceIdVal) return;
+    hoveredFaceId = faceIdVal;
+
+    clearHighlight();
+
+    const sameIdTris = faceGroupMap.get(faceIdVal) || [];
+    if (sameIdTris.length === 0) return;
+
+    const posAttr = geometry.attributes.position;
+    
+    const localPositions = [];
+    const localIndices = [];
+    const vertexMap = new Map();
+    let localVertexCounter = 0;
+
+    for (const tIdx of sameIdTris) {
+        const gIdxs = [
+            indexAttr.getX(tIdx * 3),
+            indexAttr.getX(tIdx * 3 + 1),
+            indexAttr.getX(tIdx * 3 + 2)
+        ];
+
+        for (const gIdx of gIdxs) {
+            if (!vertexMap.has(gIdx)) {
+                vertexMap.set(gIdx, localVertexCounter);
+                localPositions.push(posAttr.getX(gIdx), posAttr.getY(gIdx), posAttr.getZ(gIdx));
+                localVertexCounter++;
+            }
+            localIndices.push(vertexMap.get(gIdx));
+        }
+    }
+
+    // ハイライト専用のバッファジオメトリ
+    const highlightGeom = new THREE.BufferGeometry();
+    highlightGeom.setAttribute('position', new THREE.Float32BufferAttribute(localPositions, 3));
+    highlightGeom.setIndex(localIndices);
+
+    // --- ここから面とエッジのハイライトオブジェクト生成 ---
+    
+    // 1. 複数のハイライトオブジェクトをまとめるグループを作成
+    highlightGroup = new THREE.Group();
+    highlightGroup.name = 'dynamicHighlightGroup';
+
+    // 2. 面（Face）のハイライト設定（半透明の赤でトーンを変化させる）
+    const faceMat = new THREE.MeshBasicMaterial({
+        color: 0xff0000,
+        transparent: true,
+        opacity: 0.25,        // 不透明度（0.1〜0.3 程度が下地が見えて扱いやすいです）
+        side: THREE.DoubleSide, // 裏返った面でもハイライトされるように
+        depthTest: true,
+        depthWrite: false     // 描画順によるバグを防ぐため深度バッファへの書き込みはOFF
+    });
+    const highlightMesh = new THREE.Mesh(highlightGeom, faceMat);
+    highlightGroup.add(highlightMesh);
+
+    // 3. エッジ（輪郭線）のハイライト設定
+    const edgesGeom = new THREE.EdgesGeometry(highlightGeom, 24);
+    const edgesMat = new THREE.LineBasicMaterial({
+        color: 0xff0000,
+        linewidth: 1,
+        depthTest: true
+    });
+    const highlightEdgeMesh = new THREE.LineSegments(edgesGeom, edgesMat);
+    highlightGroup.add(highlightEdgeMesh);
+
+    // 親モデル（STEPの配置）にトランスフォームを同期
+    highlightGroup.position.copy(intersect.object.position);
+    highlightGroup.rotation.copy(intersect.object.rotation);
+    highlightGroup.scale.copy(intersect.object.scale);
+    
+    // Zファイティング（チラつき）防止用の僅かなオフセット
+    highlightGroup.scale.multiplyScalar(1.0005); 
+
+    scene.add(highlightGroup);
+}
+
+// ハイライトを消去するヘルパー関数（グループ対応版）
+function clearHighlight() {
+    if (highlightGroup) {
+        scene.remove(highlightGroup);
+        highlightGroup.traverse((child) => {
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) child.material.dispose();
+        });
+        highlightGroup = null;
+    }
+    hoveredFaceId = null;
+}
 
 ////////////////////////////////////////////////////////////
 // 指定三角形グループに頂点カラーを適用
@@ -501,10 +626,31 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
+
+    // 左クリックドラッグ中 → ペイント
     if (isLeftMouseDown && !isRotating) {
+
         controls.enabled = false;
+
         checkAndPaint(e.clientX, e.clientY, false);
+
+        clearHighlight();
+
+        return;
     }
+
+    // 通常マウス移動 → ハイライト
+    if (!isLeftMouseDown) {
+
+        updateHighlight(e.clientX, e.clientY);
+
+    }
+});
+
+// マウスがキャンバス外に出たらハイライトを消す処理も追加
+canvas.addEventListener('pointerleave', () => {
+    stopPainting();
+    clearHighlight(); 
 });
 
 const stopPainting = () => {
