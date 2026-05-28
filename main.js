@@ -243,7 +243,7 @@ renderer.setPixelRatio(window.devicePixelRatio);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-
+controls.dampingFactor = 0.2; // デフォルト値。数値を大きくするとピタッと止まり、小さくすると長く滑ります。
 
 ////////////////////////////////////////////////////////////
 // Lights
