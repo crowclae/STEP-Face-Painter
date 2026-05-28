@@ -50,6 +50,56 @@ const centerButton = document.getElementById('centerButton');
 const tagFieldsContainer = document.getElementById('tagFieldsContainer');
 
 ////////////////////////////////////////////////////////////
+// 確認モーダル
+////////////////////////////////////////////////////////////
+
+const confirmModalOverlay = document.getElementById('confirm-modal-overlay');
+const confirmModalOk      = document.getElementById('confirm-modal-ok');
+const confirmModalCancel  = document.getElementById('confirm-modal-cancel');
+
+/**
+ * モーダルを表示し、ユーザーの選択を Promise で返す。
+ * @returns {Promise<boolean>} 続行なら true、キャンセルなら false
+ */
+function showConfirmModal() {
+    return new Promise((resolve) => {
+        confirmModalOverlay.classList.add('active');
+
+        function onOk() {
+            cleanup();
+            resolve(true);
+        }
+        function onCancel() {
+            cleanup();
+            resolve(false);
+        }
+        function onOverlayClick(e) {
+            if (e.target === confirmModalOverlay) {
+                cleanup();
+                resolve(false);
+            }
+        }
+        function onKeyDown(e) {
+            if (e.key === 'Escape') { cleanup(); resolve(false); }
+            if (e.key === 'Enter')  { cleanup(); resolve(true);  }
+        }
+
+        function cleanup() {
+            confirmModalOverlay.classList.remove('active');
+            confirmModalOk.removeEventListener('click', onOk);
+            confirmModalCancel.removeEventListener('click', onCancel);
+            confirmModalOverlay.removeEventListener('click', onOverlayClick);
+            document.removeEventListener('keydown', onKeyDown);
+        }
+
+        confirmModalOk.addEventListener('click', onOk);
+        confirmModalCancel.addEventListener('click', onCancel);
+        confirmModalOverlay.addEventListener('click', onOverlayClick);
+        document.addEventListener('keydown', onKeyDown);
+    });
+}
+
+////////////////////////////////////////////////////////////
 // Preset Colors Configuration (左パレットと同じ10色)
 ////////////////////////////////////////////////////////////
 const presetColors = [
@@ -199,7 +249,16 @@ console.log('OpenCascade.js Ready', oc);
 
 stepFileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
-    if (file) await loadStepFile(file);
+    if (!file) return;
+    if (currentModel) {
+        const confirmed = await showConfirmModal();
+        if (!confirmed) {
+            e.target.value = ''; // 選択をリセット
+            return;
+        }
+    }
+    await loadStepFile(file);
+    e.target.value = ''; // 同じファイルの再選択も可能にする
 });
 
 viewerContainer.addEventListener('dragover', (e) => {
@@ -213,7 +272,12 @@ viewerContainer.addEventListener('drop', async (e) => {
     e.preventDefault();
     viewerContainer.classList.remove('dragover');
     const file = e.dataTransfer.files[0];
-    if (file) await loadStepFile(file);
+    if (!file) return;
+    if (currentModel) {
+        const confirmed = await showConfirmModal();
+        if (!confirmed) return;
+    }
+    await loadStepFile(file);
 });
 
 

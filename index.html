@@ -232,6 +232,86 @@
             pointer-events: none;
         }
 
+        /* 確認モーダル */
+        #confirm-modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.65);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        #confirm-modal-overlay.active {
+            display: flex;
+        }
+        #confirm-modal {
+            background: rgba(20, 20, 30, 0.98);
+            border: 1px solid #4b5563;
+            border-radius: 14px;
+            padding: 28px 32px;
+            width: 340px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+            animation: modal-in 0.18s ease;
+        }
+        @keyframes modal-in {
+            from { opacity: 0; transform: scale(0.92); }
+            to   { opacity: 1; transform: scale(1); }
+        }
+        #confirm-modal .modal-icon {
+            font-size: 2rem;
+            text-align: center;
+        }
+        #confirm-modal .modal-title {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: #f1c40f;
+            text-align: center;
+            letter-spacing: 0.04em;
+        }
+        #confirm-modal .modal-body {
+            font-size: 0.80rem;
+            color: #aaa;
+            line-height: 1.75;
+            text-align: center;
+        }
+        #confirm-modal .modal-body strong {
+            color: #e0e0e0;
+        }
+        #confirm-modal .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        #confirm-modal-cancel {
+            flex: 1;
+            background: #374151;
+            color: #e0e0e0;
+            border: 1px solid #4b5563;
+            padding: 9px 0;
+            border-radius: 8px;
+            font-size: 0.82rem;
+            cursor: pointer;
+            transition: background 0.18s;
+        }
+        #confirm-modal-cancel:hover { background: #4b5563; }
+        #confirm-modal-ok {
+            flex: 1;
+            background: #b45309;
+            color: #fff;
+            border: 1px solid #d97706;
+            padding: 9px 0;
+            border-radius: 8px;
+            font-size: 0.82rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.18s;
+        }
+        #confirm-modal-ok:hover { background: #d97706; }
+
         /* タグリスト行のスタイル */
         .tag-row {
             display: flex;
@@ -353,6 +433,22 @@
 
 
 
+</div>
+
+<!-- STEPファイル置き換え確認モーダル -->
+<div id="confirm-modal-overlay">
+    <div id="confirm-modal">
+        <div class="modal-icon">⚠️</div>
+        <div class="modal-title">モデルを置き換えますか？</div>
+        <div class="modal-body">
+            現在のモデルと<strong>すべての塗装データ</strong>が失われます。<br>
+            続行する前に「カラーを保存」で<br>データをバックアップすることをお勧めします。
+        </div>
+        <div class="modal-actions">
+            <button id="confirm-modal-cancel">キャンセル</button>
+            <button id="confirm-modal-ok">置き換える</button>
+        </div>
+    </div>
 </div>
 
 <script type="module" src="./main.js"></script>
