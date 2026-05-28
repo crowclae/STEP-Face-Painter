@@ -529,7 +529,7 @@ async function loadStepFile(file) {
             solidExplorer.Next();
         }
 
-        // 【修正箇所】パーツ表示切替用チェックボックスの動的生成
+// パーツ表示切替用チェックボックスの動的生成（mouseenter部分をアップデート）
         if (partsContainer) {
             partsContainer.innerHTML = '';
             
@@ -553,28 +553,27 @@ async function loadStepFile(file) {
                         }
                     });
 
-                    // ★【追加】文字列（ラベル）にマウスオーバーしたときの連動ハイライト
+                    // ★【修正】文字列（ラベル）にマウスオーバーしたときの連動ハイライト
                     label.addEventListener('mouseenter', () => {
-                        // パーツが非表示の場合はハイライトしない
-                        if (!partGroup.visible) return;
-
                         // 3D側のマウスオーバーと競合しないよう一旦クリア
                         clearHighlight();
 
-                        // 選択されたパーツのMeshを取得してハイライト用のジオメトリを作成
+                        // 選択されたパーツのMeshを取得
                         const mesh = partGroup.children.find(child => child.isMesh);
                         if (!mesh) return;
 
-                        // 現在のペイントモードに関わらず、パーツ全体を丸ごと複製してハイライト
+                        // ★パーツ本体が非表示(checkboxがOFF)であっても、
+                        // ジオメトリを複製して独立したハイライト用メッシュをシーンに強制追加する
                         const highlightGeom = mesh.geometry.clone();
                         
                         highlightGroup = new THREE.Group();
                         highlightGroup.name = 'dynamicHighlightGroup';
 
+                        // 非表示パーツと判別しやすいよう、少し透過度を調整（0.35）
                         const faceMat = new THREE.MeshBasicMaterial({
                             color: 0xff0000,
                             transparent: true,
-                            opacity: 0.3, // 少し分かりやすく少し濃いめに設定
+                            opacity: 0.35, 
                             side: THREE.DoubleSide,
                             depthTest: true,
                             depthWrite: false
@@ -587,15 +586,16 @@ async function loadStepFile(file) {
                         const highlightEdgeMesh = new THREE.LineSegments(edgesGeom, edgesMat);
                         highlightGroup.add(highlightEdgeMesh);
 
+                        // 位置や回転の同期
                         highlightGroup.position.copy(mesh.position);
                         highlightGroup.rotation.copy(mesh.rotation);
                         highlightGroup.scale.copy(mesh.scale);
-                        highlightGroup.scale.multiplyScalar(1.0005);
+                        highlightGroup.scale.multiplyScalar(1.0005); // チラつき（Z-fighting）防止
 
                         scene.add(highlightGroup);
                     });
 
-                    // ★【追加】マウスが離れたらハイライトを消去
+                    // マウスが離れたらハイライトを消去
                     label.addEventListener('mouseleave', () => {
                         clearHighlight();
                     });
