@@ -48,5 +48,9 @@
   - ライセンス: MIT License
   - 用途: WebGLを用いた3Dモデルの描画およびカメラ操作
 
+- **coi-serviceworker.js**
+  - 権利元: Guido Zuidhof
+  - ライセンス: MIT License (コード内に明記あり)
+  - 用途: SharedArrayBufferのセキュリティ制限を回避し、WebAssemblyを正常に動作させるためのスクリプト
 ---
 Developed by [crow]
