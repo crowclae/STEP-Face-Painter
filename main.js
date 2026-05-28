@@ -2,12 +2,13 @@
 // main.js  –  STEP Face Viewer (FaceID Mode)
 //
 //  - opencascade.js (WASM) で STEP を読み込み
-//  - TopExp_Explorer でフェイスを列挙 → 各頂点に faceId を付与
+//  - TopExp_Explorer (TopAbs_SOLID) でソリッドパーツ単位に分割
+//  - 各パーツ内のフェイスを巡回し、頂点属性に一意な faceId を付与
 //  - インデックス付き BufferGeometry で頂点を共有
-//  - tris.Normal(v) による解析的頂点法線（円柱・球が滑らか）
-//  - REVERSED フェイスは巻き順を反転して法線方向を統一
-//  - BFS なし：faceGroupMap の完全一致で塗りつぶし
-//  - coi-serviceworker.js が COOP/COEP ヘッダを注入
+//  - カメラ操作時・ドラッグ時のハイライト計算をスキップし軽量化
+//  - 各パーツ・面ごとの独立したカラー保存・復元（JSON）に対応
+//  - 別モデルのJSON読み込みを拒否するバリデーション機能
+//  - 折りたたみ式のパーツ表示切替UI（一括操作対応）
 ////////////////////////////////////////////////////////////
 
 
@@ -36,6 +37,7 @@ const saveColorsButton  = document.getElementById('saveColorsButton');
 const importColorsFile  = document.getElementById('importColorsFile');
 const toggleEdgesButton = document.getElementById('toggleEdgesButton');
 const toggleGridButton  = document.getElementById('toggleGridButton');
+const resetViewButton   = document.getElementById('resetViewButton');
 
 // 視点・センタリングボタンの取得
 const viewPosXBtn = document.getElementById('viewPosX');
@@ -48,6 +50,14 @@ const centerButton = document.getElementById('centerButton');
 
 // 右側タグメニュー用
 const tagFieldsContainer = document.getElementById('tagFieldsContainer');
+
+// 動的パーツ表示切替用UI要素
+const partsMenu         = document.getElementById('parts-menu');
+const partsMenuHeader   = document.getElementById('parts-menu-header');
+const partsContainer    = document.getElementById('partsContainer');
+const btnCheckAll       = document.getElementById('btn-check-all');
+const btnUncheckAll     = document.getElementById('btn-uncheck-all');
+
 
 ////////////////////////////////////////////////////////////
 // 確認モーダル
@@ -99,8 +109,9 @@ function showConfirmModal() {
     });
 }
 
+
 ////////////////////////////////////////////////////////////
-// Preset Colors Configuration (左パレットと同じ10色)
+// Preset Colors Configuration
 ////////////////////////////////////////////////////////////
 const presetColors = [
     { hex: '#e74c3c', name: 'Red' },
@@ -115,6 +126,7 @@ const presetColors = [
     { hex: '#b2bec3', name: 'Silver' }
 ];
 
+
 ////////////////////////////////////////////////////////////
 // 右側メニューのTag入力用UIを動的に生成
 ////////////////////////////////////////////////////////////
@@ -124,7 +136,6 @@ function initTagFields() {
         const row = document.createElement('div');
         row.className = 'tag-row';
 
-        // 色表示（クリックするとその色を選択できるショートカットに）
         const indicator = document.createElement('div');
         indicator.className = 'tag-color-indicator';
         indicator.style.backgroundColor = preset.hex;
@@ -134,7 +145,6 @@ function initTagFields() {
             console.log('Brush color changed via tag panel:', preset.hex);
         });
 
-        // Tag入力欄
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'tag-input';
@@ -147,6 +157,50 @@ function initTagFields() {
     });
 }
 initTagFields();
+
+
+////////////////////////////////////////////////////////////
+// パーツ表示切替パネルの折りたたみ開閉設定
+////////////////////////////////////////////////////////////
+if (partsMenuHeader && partsMenu) {
+    partsMenuHeader.addEventListener('click', () => {
+        partsMenu.classList.toggle('collapsed');
+    });
+}
+
+
+////////////////////////////////////////////////////////////
+// パーツ表示一括操作（全て表示／全て非表示）
+////////////////////////////////////////////////////////////
+if (btnCheckAll) {
+    btnCheckAll.addEventListener('click', () => {
+        if (!currentModel) return;
+        const checkboxes = partsContainer.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(cb => cb.checked = true);
+        
+        currentModel.children.forEach((partGroup) => {
+            if (partGroup.isGroup && partGroup.name.startsWith('PartGroup_Solid_')) {
+                partGroup.visible = true;
+            }
+        });
+    });
+}
+
+if (btnUncheckAll) {
+    btnUncheckAll.addEventListener('click', () => {
+        if (!currentModel) return;
+        const checkboxes = partsContainer.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(cb => cb.checked = false);
+        
+        currentModel.children.forEach((partGroup) => {
+            if (partGroup.isGroup && partGroup.name.startsWith('PartGroup_Solid_')) {
+                partGroup.visible = false;
+            }
+        });
+        clearHighlight();
+    });
+}
+
 
 ////////////////////////////////////////////////////////////
 // Scene
@@ -216,16 +270,16 @@ const mouse     = new THREE.Vector2();
 
 let currentModel    = null;
 let faceGroupMap    = null;   // Map<faceId, 三角形インデックス[]>
-let faceIdPerVertex = null;   // Float32Array: 頂点インデックス → faceId
 let isLeftMouseDown = false;
 let isRotating      = false;
 let colorHistory    = [];
 const MAX_HISTORY   = 20;
 let showEdges       = true;
 let showGrid        = true;
-let hoveredFaceId = null;       // 現在ホバーしているFaceID
-let highlightEdgeMesh = null;   // ハイライト表示用のラインメッシュ
+let hoveredFaceId   = null;   // 現在ホバーしているFaceID
+let highlightGroup  = null;   // ハイライト表示用のコンテナ
 colorPicker.value = '#e74c3c';
+
 
 ////////////////////////////////////////////////////////////
 // opencascade.js 初期化
@@ -253,12 +307,12 @@ stepFileInput.addEventListener('change', async (e) => {
     if (currentModel) {
         const confirmed = await showConfirmModal();
         if (!confirmed) {
-            e.target.value = ''; // 選択をリセット
+            e.target.value = ''; 
             return;
         }
     }
     await loadStepFile(file);
-    e.target.value = ''; // 同じファイルの再選択も可能にする
+    e.target.value = ''; 
 });
 
 viewerContainer.addEventListener('dragover', (e) => {
@@ -282,7 +336,7 @@ viewerContainer.addEventListener('drop', async (e) => {
 
 
 ////////////////////////////////////////////////////////////
-// STEP Loader
+// STEP Loader (Solid分割・表示切替UI生成)
 ////////////////////////////////////////////////////////////
 
 async function loadStepFile(file) {
@@ -301,9 +355,10 @@ async function loadStepFile(file) {
             currentModel = null;
         }
 
-        faceGroupMap    = null;
-        faceIdPerVertex = null;
-        colorHistory    = [];
+        if (partsContainer) partsContainer.innerHTML = '';
+
+        faceGroupMap = new Map(); 
+        colorHistory = [];
 
         const fileData = new Uint8Array(await file.arrayBuffer());
         oc.FS.createDataFile('/', 'model.step', fileData, true, true, true);
@@ -321,165 +376,243 @@ async function loadStepFile(file) {
         reader.TransferRoots(new oc.Message_ProgressRange_1());
         const shape = reader.OneShape();
 
-        loading.innerText = 'Tessellating faces...';
+        loading.innerText = 'Tessellating shapes...';
         new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false);
 
-        loading.innerText = 'Building FaceID map...';
+        loading.innerText = 'Building Parts and FaceID map...';
 
-        const allPositions = [];  
-        const allNormals   = [];  
-        const allIndices   = [];  
-        const allFaceIds   = [];  
+        currentModel = new THREE.Group();
+        currentModel.userData.name = file.name;
 
-        const faceGroupTmp = new Map();  
-
-        const explorer = new oc.TopExp_Explorer_1();
-        explorer.Init(
-            shape,
-            oc.TopAbs_ShapeEnum.TopAbs_FACE,
-            oc.TopAbs_ShapeEnum.TopAbs_SHAPE
-        );
-
-        let faceId       = 0;
-        let vertexOffset = 0;  
-        let triCounter   = 0;  
-
-        while (explorer.More()) {
-            const face       = oc.TopoDS.Face_1(explorer.Current());
-            const location   = new oc.TopLoc_Location_1();
-            const polyHandle = oc.BRep_Tool.Triangulation(face, location);
-
-            if (polyHandle.IsNull()) {
-                explorer.Next();
-                faceId++;
-                continue;
-            }
-
-            const tris       = polyHandle.get();
-            const nNodes     = tris.NbNodes();
-            const nTris      = tris.NbTriangles();
-            const hasTrsf    = !location.IsIdentity();
-            const trsf       = hasTrsf ? location.Transformation() : null;
-            const isReversed = face.Orientation_1() === oc.TopAbs_Orientation.TopAbs_REVERSED;
-            const sign       = isReversed ? -1 : 1;
-            const hasNormals = tris.HasNormals();
-
-            for (let v = 1; v <= nNodes; v++) {
-                const pnt = tris.Node(v);
-                let x = pnt.X(), y = pnt.Y(), z = pnt.Z();
-
-                if (hasTrsf && trsf) {
-                    const tp = pnt.Transformed(trsf);
-                    x = tp.X(); y = tp.Y(); z = tp.Z();
-                }
-                allPositions.push(x, y, z);
-                allFaceIds.push(faceId);
-
-                if (hasNormals) {
-                    const n = tris.Normal(v);
-                    allNormals.push(n.X() * sign, n.Y() * sign, n.Z() * sign);
-                } else {
-                    allNormals.push(0, 1, 0);
-                }
-            }
-
-            const triGroup = [];
-
-            for (let t = 1; t <= nTris; t++) {
-                const tri = tris.Triangle(t);
-                const i1  = tri.Value(1) - 1 + vertexOffset;
-                const i2  = tri.Value(2) - 1 + vertexOffset;
-                const i3  = tri.Value(3) - 1 + vertexOffset;
-
-                if (isReversed) {
-                    allIndices.push(i1, i3, i2);
-                } else {
-                    allIndices.push(i1, i2, i3);
-                }
-                triGroup.push(triCounter++);
-            }
-
-            faceGroupTmp.set(faceId, triGroup);
-            vertexOffset += nNodes;
-            faceId++;
-            explorer.Next();
-        }
-
-        if (allPositions.length === 0) {
-            throw new Error('No triangles found. STEP file may be empty or invalid.');
-        }
-
-        loading.innerText = 'Building Three.js geometry...';
-
-        const geometry = new THREE.BufferGeometry();
-
-        geometry.setAttribute(
-            'position',
-            new THREE.Float32BufferAttribute(allPositions, 3)
-        );
-        geometry.setAttribute(
-            'normal',
-            new THREE.Float32BufferAttribute(allNormals, 3)
-        );
-
-        const faceIdArray = new Float32Array(allFaceIds);
-        geometry.setAttribute(
-            'faceId',
-            new THREE.BufferAttribute(faceIdArray, 1)
-        );
-
-        geometry.setIndex(allIndices);
-
-        const hasZeroNormal = allNormals.some((v, i) =>
-            i % 3 === 1 && allNormals[i-1] === 0 && v === 1 && allNormals[i+1] === 0
-        );
-        if (hasZeroNormal) {
-            geometry.computeVertexNormals();
-        }
-
-        const vertexCount = allPositions.length / 3;
-        const defaultColor = new THREE.Color('#ecf0f1'); 
-        const colors = new Float32Array(vertexCount * 3);
-        for (let i = 0; i < vertexCount; i++) {
-            colors[i * 3]     = defaultColor.r;
-            colors[i * 3 + 1] = defaultColor.g;
-            colors[i * 3 + 2] = defaultColor.b;
-        }
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-        const material = new THREE.MeshStandardMaterial({
-            vertexColors: true,
-            metalness:    0.05,
-            roughness:    0.65,
-        });
-
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.userData.name = file.name;
-        mesh.castShadow    = true;
-        mesh.receiveShadow = true;
-
-        const edgesGeometry = new THREE.EdgesGeometry(geometry, 24);
         const edgesMaterial = new THREE.LineBasicMaterial({ 
             color: 0x555555, 
             linewidth: 1     
         });
-        const edgeLines = new THREE.LineSegments(edgesGeometry, edgesMaterial);
-        edgeLines.name = 'edgeLines';
-        edgeLines.visible = showEdges; 
 
-        currentModel = new THREE.Group();
-        currentModel.add(mesh);
-        currentModel.add(edgeLines); 
+        let globalFaceId = 0;
+        let totalTriangles = 0;
+
+        // SOLID（塊）単位で探索してパーツを個別に構築
+        const solidExplorer = new oc.TopExp_Explorer_1();
+        solidExplorer.Init(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+
+        let solidId = 0;
+
+        while (solidExplorer.More()) {
+            const solid = oc.TopoDS.Solid_1(solidExplorer.Current());
+
+            const partPositions = [];
+            const partNormals   = [];
+            const partIndices   = [];
+            const partFaceIds   = [];
+
+            let partVertexOffset = 0;
+            let partTriCounter = 0;
+
+            const faceExplorer = new oc.TopExp_Explorer_1();
+            faceExplorer.Init(solid, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+
+            while (faceExplorer.More()) {
+                const face       = oc.TopoDS.Face_1(faceExplorer.Current());
+                const location   = new oc.TopLoc_Location_1();
+                const polyHandle = oc.BRep_Tool.Triangulation(face, location);
+
+                if (polyHandle.IsNull()) {
+                    faceExplorer.Next();
+                    globalFaceId++;
+                    continue;
+                }
+
+                const tris       = polyHandle.get();
+                const nNodes     = tris.NbNodes();
+                const nTris      = tris.NbTriangles();
+                const hasTrsf    = !location.IsIdentity();
+                const trsf       = hasTrsf ? location.Transformation() : null;
+                const isReversed = face.Orientation_1() === oc.TopAbs_Orientation.TopAbs_REVERSED;
+                const sign       = isReversed ? -1 : 1;
+                const hasNormals = tris.HasNormals();
+
+                for (let v = 1; v <= nNodes; v++) {
+                    const pnt = tris.Node(v);
+                    let x = pnt.X(), y = pnt.Y(), z = pnt.Z();
+
+                    if (hasTrsf && trsf) {
+                        const tp = pnt.Transformed(trsf);
+                        x = tp.X(); y = tp.Y(); z = tp.Z();
+                    }
+                    partPositions.push(x, y, z);
+                    partFaceIds.push(globalFaceId);
+
+                    if (hasNormals) {
+                        const n = tris.Normal(v);
+                        partNormals.push(n.X() * sign, n.Y() * sign, n.Z() * sign);
+                    } else {
+                        partNormals.push(0, 1, 0);
+                    }
+                }
+
+                const triGroup = [];
+                for (let t = 1; t <= nTris; t++) {
+                    const tri = tris.Triangle(t);
+                    const i1  = tri.Value(1) - 1 + partVertexOffset;
+                    const i2  = tri.Value(2) - 1 + partVertexOffset;
+                    const i3  = tri.Value(3) - 1 + partVertexOffset;
+
+                    if (isReversed) {
+                        partIndices.push(i1, i3, i2);
+                    } else {
+                        partIndices.push(i1, i2, i3);
+                    }
+
+                    triGroup.push(partTriCounter++);
+                    totalTriangles++;
+                }
+
+                faceGroupMap.set(globalFaceId, triGroup);
+
+                partVertexOffset += nNodes;
+                globalFaceId++;
+                faceExplorer.Next();
+            }
+
+            if (partPositions.length > 0) {
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(partPositions, 3));
+                geometry.setAttribute('normal', new THREE.Float32BufferAttribute(partNormals, 3));
+                
+                const faceIdArray = new Float32Array(partFaceIds);
+                geometry.setAttribute('faceId', new THREE.BufferAttribute(faceIdArray, 1));
+                geometry.setIndex(partIndices);
+
+                const hasZeroNormal = partNormals.some((v, i) =>
+                    i % 3 === 1 && partNormals[i-1] === 0 && v === 1 && partNormals[i+1] === 0
+                );
+                if (hasZeroNormal) {
+                    geometry.computeVertexNormals();
+                }
+
+                const vertexCount = partPositions.length / 3;
+                const defaultColor = new THREE.Color('#ecf0f1');
+                const colors = new Float32Array(vertexCount * 3);
+                for (let i = 0; i < vertexCount; i++) {
+                    colors[i * 3]     = defaultColor.r;
+                    colors[i * 3 + 1] = defaultColor.g;
+                    colors[i * 3 + 2] = defaultColor.b;
+                }
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+                const material = new THREE.MeshStandardMaterial({
+                    vertexColors: true,
+                    metalness:    0.05,
+                    roughness:    0.65,
+                });
+
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.name = `Solid_Part_${solidId}`;
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+
+                const edgesGeometry = new THREE.EdgesGeometry(geometry, 24);
+                const edgeLines = new THREE.LineSegments(edgesGeometry, edgesMaterial);
+                edgeLines.name = 'edgeLines';
+                edgeLines.visible = showEdges;
+
+                const partGroup = new THREE.Group();
+                partGroup.name = `PartGroup_Solid_${solidId}`;
+                partGroup.add(mesh);
+                partGroup.add(edgeLines);
+
+                currentModel.add(partGroup);
+                solidId++;
+            }
+
+            solidExplorer.Next();
+        }
+
+        // 【修正箇所】パーツ表示切替用チェックボックスの動的生成
+        if (partsContainer) {
+            partsContainer.innerHTML = '';
+            
+            currentModel.children.forEach((partGroup) => {
+                if (partGroup.isGroup && partGroup.name.startsWith('PartGroup_Solid_')) {
+                    const solidIdx = partGroup.name.replace('PartGroup_Solid_', '');
+                    const partLabelText = `パーツ ${Number(solidIdx) + 1}`;
+
+                    const label = document.createElement('label');
+                    label.className = 'part-check-label';
+
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = true;
+
+                    // チェックボックスの変更イベント
+                    checkbox.addEventListener('change', (e) => {
+                        partGroup.visible = e.target.checked;
+                        if (!e.target.checked) {
+                            clearHighlight();
+                        }
+                    });
+
+                    // ★【追加】文字列（ラベル）にマウスオーバーしたときの連動ハイライト
+                    label.addEventListener('mouseenter', () => {
+                        // パーツが非表示の場合はハイライトしない
+                        if (!partGroup.visible) return;
+
+                        // 3D側のマウスオーバーと競合しないよう一旦クリア
+                        clearHighlight();
+
+                        // 選択されたパーツのMeshを取得してハイライト用のジオメトリを作成
+                        const mesh = partGroup.children.find(child => child.isMesh);
+                        if (!mesh) return;
+
+                        // 現在のペイントモードに関わらず、パーツ全体を丸ごと複製してハイライト
+                        const highlightGeom = mesh.geometry.clone();
+                        
+                        highlightGroup = new THREE.Group();
+                        highlightGroup.name = 'dynamicHighlightGroup';
+
+                        const faceMat = new THREE.MeshBasicMaterial({
+                            color: 0xff0000,
+                            transparent: true,
+                            opacity: 0.3, // 少し分かりやすく少し濃いめに設定
+                            side: THREE.DoubleSide,
+                            depthTest: true,
+                            depthWrite: false
+                        });
+                        const highlightMesh = new THREE.Mesh(highlightGeom, faceMat);
+                        highlightGroup.add(highlightMesh);
+
+                        const edgesGeom = new THREE.EdgesGeometry(highlightGeom, 24);
+                        const edgesMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 1, depthTest: true });
+                        const highlightEdgeMesh = new THREE.LineSegments(edgesGeom, edgesMat);
+                        highlightGroup.add(highlightEdgeMesh);
+
+                        highlightGroup.position.copy(mesh.position);
+                        highlightGroup.rotation.copy(mesh.rotation);
+                        highlightGroup.scale.copy(mesh.scale);
+                        highlightGroup.scale.multiplyScalar(1.0005);
+
+                        scene.add(highlightGroup);
+                    });
+
+                    // ★【追加】マウスが離れたらハイライトを消去
+                    label.addEventListener('mouseleave', () => {
+                        clearHighlight();
+                    });
+
+                    label.appendChild(checkbox);
+                    label.appendChild(document.createTextNode(partLabelText));
+                    partsContainer.appendChild(label);
+                }
+            });
+        }
+
         scene.add(currentModel);
+        triCountLabel.innerText = totalTriangles.toLocaleString();
 
-        faceGroupMap    = faceGroupTmp;
-        faceIdPerVertex = faceIdArray;
-
-        triCountLabel.innerText = triCounter.toLocaleString();
-        fitCameraToObject(currentModel);
-
+        triggerAutoFit();
         loading.style.display = 'none';
-        console.log(`STEP loaded: ${faceId} faces, ${triCounter} triangles`);
+        console.log(`STEP loaded by Solid: ${solidId} genuine parts found, ${globalFaceId} total faces.`);
 
     } catch (err) {
         console.error(err);
@@ -507,12 +640,18 @@ function checkAndPaint(clientX, clientY, isFirstClick = false) {
     const intersect = intersects.find(hit => hit.object.isMesh);
     if (!intersect) return;
 
+    // 非表示状態のパーツはペイント対象から除外
+    if (intersect.object.parent && intersect.object.parent.visible === false) return;
+
     const hitTriangle = intersect.faceIndex;
     if (hitTriangle === undefined) return;
 
-    const geometry   = intersect.object.geometry;
+    const targetMesh = intersect.object;
+    const geometry   = targetMesh.geometry;
     const indexAttr  = geometry.index;
     const faceIdAttr = geometry.attributes.faceId;
+
+    if (!indexAttr || !faceIdAttr) return;
 
     const vertexIndex = indexAttr.getX(hitTriangle * 3);
     const faceIdVal   = Math.round(faceIdAttr.getX(vertexIndex));
@@ -520,22 +659,58 @@ function checkAndPaint(clientX, clientY, isFirstClick = false) {
     faceIdLabel.innerText   = faceIdVal;
     meshNameLabel.innerText = `Face_${faceIdVal}`;
 
-    const targetMesh  = intersect.object;
-    const sameIdTris  = faceGroupMap.get(faceIdVal) || [];
+    const paintModeElement = document.querySelector('input[name="paintMode"]:checked');
+    const paintMode = paintModeElement ? paintModeElement.value : 'face';
 
     if (isFirstClick) saveHistory(targetMesh);
-    applyColorToFaceGroup(targetMesh, sameIdTris, colorPicker.value);
+
+    if (paintMode === 'part') {
+        applyColorToPart(targetMesh, colorPicker.value);
+    } else {
+        applyColorToFaceIdInMesh(targetMesh, faceIdVal, colorPicker.value);
+    }
 }
 
-////////////////////////////////////////////////////////////
-// マウスオーバー時のハイライト処理（面とエッジの両方を強調）
-////////////////////////////////////////////////////////////
+// パーツ全体（メッシュ全体）に頂点カラーを適用
+function applyColorToPart(mesh, hexColor) {
+    const geometry = mesh.geometry;
+    const colorAttr = geometry.attributes.color;
+    if (!colorAttr) return;
 
-// ハイライト表示用のオブジェクトを保持する変数（トップレベルのStateに追加・変更）
-let highlightGroup = null; // LineSegments から Group もしくは単一のコンテナに変更するため
+    const color = new THREE.Color(hexColor);
+    const count = colorAttr.count;
+
+    for (let i = 0; i < count; i++) {
+        colorAttr.setXYZ(i, color.r, color.g, color.b);
+    }
+    colorAttr.needsUpdate = true;
+}
+
+// メッシュ内の特定の FaceID を持つ頂点だけを塗りつぶす
+function applyColorToFaceIdInMesh(mesh, targetFaceId, hexColor) {
+    const geometry = mesh.geometry;
+    const colorAttr = geometry.attributes.color;
+    const faceIdAttr = geometry.attributes.faceId;
+    if (!colorAttr || !faceIdAttr) return;
+
+    const color = new THREE.Color(hexColor);
+    const count = colorAttr.count;
+
+    for (let i = 0; i < count; i++) {
+        if (Math.round(faceIdAttr.getX(i)) === targetFaceId) {
+            colorAttr.setXYZ(i, color.r, color.g, color.b);
+        }
+    }
+    colorAttr.needsUpdate = true;
+}
+
+
+////////////////////////////////////////////////////////////
+// マウスオーバー時のハイライト処理 (カメラ操作時スキップ対応)
+////////////////////////////////////////////////////////////
 
 function updateHighlight(clientX, clientY) {
-    if (!currentModel || !faceGroupMap) return;
+    if (!currentModel) return;
 
     const rect = canvas.getBoundingClientRect();
     mouse.x =  ((clientX - rect.left) / rect.width)  * 2 - 1;
@@ -547,7 +722,7 @@ function updateHighlight(clientX, clientY) {
     const intersects = raycaster.intersectObjects(currentModel.children, true);
     const intersect = intersects.find(hit => hit.object.isMesh);
     
-    if (!intersect) {
+    if (!intersect || (intersect.object.parent && intersect.object.parent.visible === false)) {
         clearHighlight();
         return;
     }
@@ -555,9 +730,12 @@ function updateHighlight(clientX, clientY) {
     const hitTriangle = intersect.faceIndex;
     if (hitTriangle === undefined) return;
 
-    const geometry   = intersect.object.geometry;
+    const targetMesh = intersect.object;
+    const geometry   = targetMesh.geometry;
     const indexAttr  = geometry.index;
     const faceIdAttr = geometry.attributes.faceId;
+
+    if (!indexAttr || !faceIdAttr) return;
 
     const vertexIndex = indexAttr.getX(hitTriangle * 3);
     const faceIdVal   = Math.round(faceIdAttr.getX(vertexIndex));
@@ -567,78 +745,73 @@ function updateHighlight(clientX, clientY) {
 
     clearHighlight();
 
-    const sameIdTris = faceGroupMap.get(faceIdVal) || [];
-    if (sameIdTris.length === 0) return;
+    const paintModeElement = document.querySelector('input[name="paintMode"]:checked');
+    const paintMode = paintModeElement ? paintModeElement.value : 'face';
 
-    const posAttr = geometry.attributes.position;
-    
-    const localPositions = [];
-    const localIndices = [];
-    const vertexMap = new Map();
-    let localVertexCounter = 0;
+    let highlightGeom = new THREE.BufferGeometry();
 
-    for (const tIdx of sameIdTris) {
-        const gIdxs = [
-            indexAttr.getX(tIdx * 3),
-            indexAttr.getX(tIdx * 3 + 1),
-            indexAttr.getX(tIdx * 3 + 2)
-        ];
+    if (paintMode === 'part') {
+        highlightGeom = geometry.clone();
+    } else {
+        const posAttr = geometry.attributes.position;
+        const localPositions = [];
+        const localIndices = [];
+        const vertexMap = new Map();
+        let localVertexCounter = 0;
 
-        for (const gIdx of gIdxs) {
-            if (!vertexMap.has(gIdx)) {
-                vertexMap.set(gIdx, localVertexCounter);
-                localPositions.push(posAttr.getX(gIdx), posAttr.getY(gIdx), posAttr.getZ(gIdx));
-                localVertexCounter++;
+        const count = indexAttr.count;
+        for (let i = 0; i < count; i += 3) {
+            const i0 = indexAttr.getX(i);
+            const i1 = indexAttr.getX(i + 1);
+            const i2 = indexAttr.getX(i + 2);
+
+            const fId = Math.round(faceIdAttr.getX(i0));
+            if (fId === faceIdVal) {
+                const gIdxs = [i0, i1, i2];
+                for (const gIdx of gIdxs) {
+                    if (!vertexMap.has(gIdx)) {
+                        vertexMap.set(gIdx, localVertexCounter);
+                        localPositions.push(posAttr.getX(gIdx), posAttr.getY(gIdx), posAttr.getZ(gIdx));
+                        localVertexCounter++;
+                    }
+                    localIndices.push(vertexMap.get(gIdx));
+                }
             }
-            localIndices.push(vertexMap.get(gIdx));
         }
+
+        if (localPositions.length === 0) return;
+        highlightGeom.setAttribute('position', new THREE.Float32BufferAttribute(localPositions, 3));
+        highlightGeom.setIndex(localIndices);
     }
-
-    // ハイライト専用のバッファジオメトリ
-    const highlightGeom = new THREE.BufferGeometry();
-    highlightGeom.setAttribute('position', new THREE.Float32BufferAttribute(localPositions, 3));
-    highlightGeom.setIndex(localIndices);
-
-    // --- ここから面とエッジのハイライトオブジェクト生成 ---
     
-    // 1. 複数のハイライトオブジェクトをまとめるグループを作成
     highlightGroup = new THREE.Group();
     highlightGroup.name = 'dynamicHighlightGroup';
 
-    // 2. 面（Face）のハイライト設定（半透明の赤でトーンを変化させる）
     const faceMat = new THREE.MeshBasicMaterial({
         color: 0xff0000,
         transparent: true,
-        opacity: 0.25,        // 不透明度（0.1〜0.3 程度が下地が見えて扱いやすいです）
-        side: THREE.DoubleSide, // 裏返った面でもハイライトされるように
+        opacity: 0.25,        
+        side: THREE.DoubleSide, 
         depthTest: true,
-        depthWrite: false     // 描画順によるバグを防ぐため深度バッファへの書き込みはOFF
+        depthWrite: false     
     });
     const highlightMesh = new THREE.Mesh(highlightGeom, faceMat);
     highlightGroup.add(highlightMesh);
 
-    // 3. エッジ（輪郭線）のハイライト設定
     const edgesGeom = new THREE.EdgesGeometry(highlightGeom, 24);
-    const edgesMat = new THREE.LineBasicMaterial({
-        color: 0xff0000,
-        linewidth: 1,
-        depthTest: true
-    });
+    const edgesMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 1, depthTest: true });
     const highlightEdgeMesh = new THREE.LineSegments(edgesGeom, edgesMat);
     highlightGroup.add(highlightEdgeMesh);
 
-    // 親モデル（STEPの配置）にトランスフォームを同期
-    highlightGroup.position.copy(intersect.object.position);
-    highlightGroup.rotation.copy(intersect.object.rotation);
-    highlightGroup.scale.copy(intersect.object.scale);
+    highlightGroup.position.copy(targetMesh.position);
+    highlightGroup.rotation.copy(targetMesh.rotation);
+    highlightGroup.scale.copy(targetMesh.scale);
     
-    // Zファイティング（チラつき）防止用の僅かなオフセット
     highlightGroup.scale.multiplyScalar(1.0005); 
 
     scene.add(highlightGroup);
 }
 
-// ハイライトを消去するヘルパー関数（グループ対応版）
 function clearHighlight() {
     if (highlightGroup) {
         scene.remove(highlightGroup);
@@ -649,29 +822,6 @@ function clearHighlight() {
         highlightGroup = null;
     }
     hoveredFaceId = null;
-}
-
-////////////////////////////////////////////////////////////
-// 指定三角形グループに頂点カラーを適用
-////////////////////////////////////////////////////////////
-
-function applyColorToFaceGroup(mesh, triangleIndices, hexColor) {
-    const geometry  = mesh.geometry;
-    const colorAttr = geometry.attributes.color;
-    const indexAttr = geometry.index;
-    if (!colorAttr || !indexAttr) return;
-
-    const color = new THREE.Color(hexColor);
-
-    for (const tIdx of triangleIndices) {
-        const v0 = indexAttr.getX(tIdx * 3);
-        const v1 = indexAttr.getX(tIdx * 3 + 1);
-        const v2 = indexAttr.getX(tIdx * 3 + 2);
-        colorAttr.setXYZ(v0, color.r, color.g, color.b);
-        colorAttr.setXYZ(v1, color.r, color.g, color.b);
-        colorAttr.setXYZ(v2, color.r, color.g, color.b);
-    }
-    colorAttr.needsUpdate = true;
 }
 
 
@@ -690,37 +840,27 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
-
-    // 左クリックドラッグ中 → ペイント
     if (isLeftMouseDown && !isRotating) {
-
         controls.enabled = false;
-
         checkAndPaint(e.clientX, e.clientY, false);
-
         clearHighlight();
-
         return;
     }
 
-    // 通常マウス移動 → ハイライト
-    if (!isLeftMouseDown) {
-
-        updateHighlight(e.clientX, e.clientY);
-
+    // カメラ操作中（回転・パン・ズーム）やドラッグ中は重い計算をスキップして高速化
+    if (isRotating || isLeftMouseDown) {
+        clearHighlight();
+        return;
     }
-});
 
-// マウスがキャンバス外に出たらハイライトを消す処理も追加
-canvas.addEventListener('pointerleave', () => {
-    stopPainting();
-    clearHighlight(); 
+    updateHighlight(e.clientX, e.clientY);
 });
 
 const stopPainting = () => {
     isLeftMouseDown  = false;
     isRotating       = false;
     controls.enabled = true;
+    clearHighlight(); 
 };
 window.addEventListener('pointerup', stopPainting);
 canvas.addEventListener('pointerleave', stopPainting);
@@ -742,26 +882,30 @@ document.querySelectorAll('.palette-btn').forEach((btn) => {
 
 
 ////////////////////////////////////////////////////////////
-// Undo (★バグ修正: slice() でメモリ参照を切断し、値を複製する)
+// Undo
 ////////////////////////////////////////////////////////////
 
 function saveHistory(mesh) {
     const attr = mesh?.geometry?.attributes?.color;
     if (!attr || !attr.array) return;
-    // .slice()を呼ぶことで、参照元のメモリ空間とは独立したディープコピーを作成して保存します
     colorHistory.push(attr.array.slice());
     if (colorHistory.length > MAX_HISTORY) colorHistory.shift();
 }
 
 undoButton.addEventListener('click', () => {
     if (!colorHistory.length || !currentModel) return;
-    const mesh = currentModel.children[0];
-    if (!mesh) return;
-    const attr = mesh.geometry.attributes.color;
-    if (!attr) return;
-    attr.array.set(colorHistory.pop());
-    attr.needsUpdate = true;
+    
+    currentModel.traverse((child) => {
+        if (child.isMesh && colorHistory.length > 0) {
+            const attr = child.geometry.attributes.color;
+            if (attr) {
+                attr.array.set(colorHistory.pop());
+                attr.needsUpdate = true;
+            }
+        }
+    });
 });
+
 
 ////////////////////////////////////////////////////////////
 // Grid
@@ -771,53 +915,60 @@ const gridHelper = new THREE.GridHelper(500, 50, 0x444444, 0x2a2a2a);
 gridHelper.name = 'gridHelper'; 
 scene.add(gridHelper);
 
+
 ////////////////////////////////////////////////////////////
-// Save / Load Color JSON (★FaceIDベースのマッピング方式に改良)
+// Save / Load Color JSON (バリデーションチェック機能付き)
 ////////////////////////////////////////////////////////////
 
 saveColorsButton.addEventListener('click', () => {
     if (!currentModel) { alert('モデルが読み込まれていません。'); return; }
-    const mesh = currentModel.children[0];
-    const geometry = mesh?.geometry;
-    const colorAttr = geometry?.attributes?.color;
-    const faceIdAttr = geometry?.attributes?.faceId;
 
-    if (!colorAttr || !faceIdAttr) { alert('カラーデータまたはFaceIDデータがありません。'); return; }
-
-    // 1. FaceIDごとの色を格納するマップ（FaceID -> HEXカラー）を作成
     const faceColorMap = {};
-    const vertexCount = colorAttr.count;
+    let totalVerticesProcessed = 0;
 
-    for (let i = 0; i < vertexCount; i++) {
-        const fId = Math.round(faceIdAttr.getX(i));
-        
-        // すでにこのFaceIDの色を記録してあればスキップ（高速化）
-        if (faceColorMap[fId] !== undefined) continue;
+    currentModel.traverse((child) => {
+        if (child.isMesh) {
+            const geometry = child.geometry;
+            const colorAttr = geometry?.attributes?.color;
+            const faceIdAttr = geometry?.attributes?.faceId;
 
-        // 頂点の色(RGB)を取得してHEX文字列に変換
-        const r = colorAttr.getX(i);
-        const g = colorAttr.getY(i);
-        const b = colorAttr.getZ(i);
-        const color = new THREE.Color(r, g, b);
-        faceColorMap[fId] = "#" + color.getHexString();
+            if (colorAttr && faceIdAttr) {
+                const vertexCount = colorAttr.count;
+
+                for (let i = 0; i < vertexCount; i++) {
+                    const fId = Math.round(faceIdAttr.getX(i));
+                    if (faceColorMap[fId] !== undefined) continue;
+
+                    const r = colorAttr.getX(i);
+                    const g = colorAttr.getY(i);
+                    const b = colorAttr.getZ(i);
+                    const color = new THREE.Color(r, g, b);
+                    faceColorMap[fId] = "#" + color.getHexString();
+                }
+                totalVerticesProcessed += vertexCount;
+            }
+        }
+    });
+
+    if (Object.keys(faceColorMap).length === 0) {
+        alert('カラーデータまたはFaceIDデータが見つかりませんでした。');
+        return;
     }
 
-    // 2. 現在画面に入力されているTag情報を配列として取得
     const tagsData = presetColors.map((_, index) => {
         const inputEl = document.getElementById(`tag-input-${index}`);
         return inputEl ? inputEl.value : '';
     });
 
-    // 3. エクスポートデータ構造の構築
+    const modelName = currentModel.userData.name || "model.step";
     const exportData = {
         application: "STEP Face Viewer – FaceID Mode",
         timestamp: Date.now(),
-        fileName: mesh.userData.name || "model.step",
-        faceColors: faceColorMap, // ★頂点配列ではなく、[FaceID: 色] のペアを保存
+        fileName: modelName,
+        faceColors: faceColorMap, 
         tags: tagsData
     };
 
-    // 4. ファイルダウンロード処理
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
     const a = Object.assign(document.createElement('a'), {
         href: URL.createObjectURL(blob),
@@ -827,7 +978,8 @@ saveColorsButton.addEventListener('click', () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
-    console.log('Color mapping by FaceID and tags saved successfully.');
+    
+    console.log(`Color mapping saved successfully. Map size: ${Object.keys(faceColorMap).length}`);
 });
 
 importColorsFile.addEventListener('change', (e) => {
@@ -843,54 +995,60 @@ importColorsFile.addEventListener('change', (e) => {
     reader.onload = (ev) => {
         try {
             const data = JSON.parse(ev.target.result);
-            const mesh = currentModel.children[0];
-            const geometry = mesh?.geometry;
-            const colorAttr = geometry?.attributes?.color;
-            const faceIdAttr = geometry?.attributes?.faceId;
 
-            if (!colorAttr || !faceIdAttr) { alert('ジオメトリが無効です。'); return; }
-
-            // 互換性チェック: 古い「頂点数一致チェック」の代わりにFaceID用データがあるか確認
             if (!data.faceColors) {
-                alert('互換性のない形式のJSONファイルです（FaceIDマッピングが含まれていません）。');
+                alert('互換性のない形式のJSONファイルです（faceColorsが含まれていません）。');
                 return;
             }
 
-            // 1. 読み込み前の状態をUndo履歴に入れる
-            saveHistory(mesh);
+            // 【バリデーションチェック】Face数が異なる別モデルからの読み込みを拒否
+            const currentTotalFaces = faceGroupMap.size;
+            const jsonTotalFaces = Object.keys(data.faceColors).length;
 
-            // 2. 画面上の全頂点をループし、JSON内のFaceIDに対応する色を1つずつ適用
-            const vertexCount = colorAttr.count;
+            if (currentTotalFaces !== jsonTotalFaces) {
+                alert(`❌ 異なるモデルのカラーデータです。\n\n現在のモデルのFace数: ${currentTotalFaces}\nJSONのFace数: ${jsonTotalFaces}\n\n読み込みを中止しました。`);
+                e.target.value = '';
+                return; 
+            }
+
+            currentModel.traverse((child) => {
+                if (child.isMesh) saveHistory(child);
+            });
+
             const tempColor = new THREE.Color();
             let appliedCount = 0;
 
-            for (let i = 0; i < vertexCount; i++) {
-                const fId = Math.round(faceIdAttr.getX(i));
-                const targetHex = data.faceColors[fId];
+            currentModel.traverse((child) => {
+                if (child.isMesh) {
+                    const geometry = child.geometry;
+                    const colorAttr = geometry?.attributes?.color;
+                    const faceIdAttr = geometry?.attributes?.faceId;
 
-                // もしJSON内にそのFaceIDの色情報が記録されていれば適用
-                if (targetHex !== undefined) {
-                    tempColor.set(targetHex);
-                    colorAttr.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
-                    appliedCount++;
+                    if (colorAttr && faceIdAttr) {
+                        const vertexCount = colorAttr.count;
+                        for (let i = 0; i < vertexCount; i++) {
+                            const fId = Math.round(faceIdAttr.getX(i));
+                            const targetHex = data.faceColors[fId];
+
+                            if (targetHex !== undefined) {
+                                tempColor.set(targetHex);
+                                colorAttr.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
+                                appliedCount++;
+                            }
+                        }
+                        colorAttr.needsUpdate = true;
+                    }
                 }
-            }
+            });
 
-            // 変更を画面に反映
-            colorAttr.needsUpdate = true;
-
-            // 3. Tag情報の復元処理
             if (data.tags && Array.isArray(data.tags)) {
                 data.tags.forEach((tagText, index) => {
                     const inputEl = document.getElementById(`tag-input-${index}`);
-                    if (inputEl) {
-                        inputEl.value = tagText || '';
-                    }
+                    if (inputEl) inputEl.value = tagText || '';
                 });
             }
 
-            alert('FaceIDマッピングに基づき、カラーデータとTag情報を復元しました。');
-            console.log(`Restored ${appliedCount} vertices using FaceID mapping.`);
+            alert('FaceIDマッピングに基づき、カラーデータを復元しました。');
         } catch (err) {
             console.error(err);
             alert('JSON 読み込み失敗: ' + err.message);
@@ -905,33 +1063,51 @@ importColorsFile.addEventListener('change', (e) => {
 // Camera Fit (OrthographicCamera用)
 ////////////////////////////////////////////////////////////
 
-function fitCameraToObject(obj) {
-    const box    = new THREE.Box3().setFromObject(obj);
+function triggerAutoFit() {
+    if (!currentModel) return;
+    
+    const box = new THREE.Box3().setFromObject(currentModel);
     const center = box.getCenter(new THREE.Vector3());
-    const size   = box.getSize(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
 
-    const aspect = window.innerWidth / window.innerHeight;
-    const baseSize = maxDim * 1.2;
-
-    camera.left   = -baseSize * aspect / 2;
-    camera.right  =  baseSize * aspect / 2;
-    camera.top    =  baseSize / 2;
-    camera.bottom = -baseSize / 2;
-
-    const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
-    camera.position.copy(center).addScaledVector(dir, maxDim * 2);
-
+    camera.up.set(0, 1, 0);
     controls.target.copy(center);
+
+    const initDir = new THREE.Vector3(1, 0.8, 1).normalize();
+    camera.position.copy(center).addScaledVector(initDir, maxDim * 10);
+
+    camera.zoom = 1;
+
+    const aspect = window.innerWidth / window.innerHeight;
+    camera.left   = -aspect / 2;
+    camera.right  =  aspect / 2;
+    camera.top    =  1 / 2;
+    camera.bottom = -1 / 2;
+
+    let requiredCalculatedSize = maxDim;
+    if (aspect < 1) {
+        requiredCalculatedSize = maxDim / aspect;
+    }
+    const margin = 1.2; 
+    camera.zoom = 1 / (requiredCalculatedSize * margin);
+
+    camera.near = 0.1;
+    camera.far  = maxDim * 100; 
     
-    camera.near = maxDim / 100;
-    camera.far  = maxDim * 100;
     camera.updateProjectionMatrix();
     controls.update();
+    controls.saveState(); 
 }
 
+resetViewButton.addEventListener('click', () => {
+    triggerAutoFit();
+    console.log('View reset: Direction and camera.zoom re-fitted perfectly.');
+});
+
+
 ////////////////////////////////////////////////////////////
-// スクリーンショット機能（背景透過 PNG 保存）
+// スクリーンショット機能
 ////////////////////////////////////////////////////////////
 
 const screenshotButton = document.getElementById('mode-badge');
@@ -943,37 +1119,25 @@ if (screenshotButton) {
             return;
         }
 
-        // --- 1. キャプチャ前の準備（ハイライトを一時的に非表示） ---
-        // マウスオーバーの赤枠や赤面が写り込まないように一時退避
-        const currentHoveredId = hoveredFaceId;
         clearHighlight();
 
-        // 背景を透過させるために、シーンの背景を一瞬だけ null (透明) に設定
         const originalBackground = scene.background;
         scene.background = null;
 
-        // renderer の clearAlpha を 0 に設定（透過許可）
         const originalClearAlpha = renderer.getClearAlpha();
         renderer.setClearAlpha(0);
 
-        // --- 2. キャプチャ用の明示的なレンダリング ---
-        // 画面サイズそのままで描画バッファを確定させる
         renderer.render(scene, camera);
 
-        // --- 3. データ抽出とダウンロード処理 ---
         try {
-            // WebGL から DataURL (PNG) を取得
             const dataURL = canvas.toDataURL('image/png');
-
-            // ファイル名用のタイムスタンプを作成
             const now = new Date();
             const timeStr = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-            const modelName = currentModel.children[0]?.userData.name || "model";
-            const cleanName = modelName.replace(/\.[^/.]+$/, ""); // 拡張子削除
+            const modelName = currentModel.userData.name || "model";
+            const cleanName = modelName.replace(/\.[^/.]+$/, ""); 
             
             const fileName = `screenshot_${cleanName}_${timeStr}.png`;
 
-            // 擬似リンクを作ってダウンロードを発火
             const a = Object.assign(document.createElement('a'), {
                 href: dataURL,
                 download: fileName
@@ -988,17 +1152,10 @@ if (screenshotButton) {
             alert('スクリーンショットの保存に失敗しました。');
         }
 
-        // --- 4. 状態の復元 ---
-        // シーン背景とアルファ設定を元に戻す
         scene.background = originalBackground;
         renderer.setClearAlpha(originalClearAlpha);
-
-        // 次のマウス移動で自然に再描画されるよう、一時退避したIDをもとにハイライトを復元する準備
-        // （即座に復元したい場合は、直前のマウス座標を保持して updateHighlight を叩くことも可能です）
-        hoveredFaceId = null; 
     });
 
-    // ボタンにマウスが乗ったときのビジュアルフィードバック
     screenshotButton.addEventListener('mouseenter', () => {
         screenshotButton.style.background = 'rgba(30, 41, 59, 0.95)';
         screenshotButton.style.borderColor = '#7dd3fc';
@@ -1021,10 +1178,11 @@ if (toggleEdgesButton) {
         showEdges = !showEdges;
         toggleEdgesButton.innerText = showEdges ? 'エッジ非表示' : 'エッジ表示';
 
-        const edgeLines = currentModel.getObjectByName('edgeLines');
-        if (edgeLines) {
-            edgeLines.visible = showEdges;
-        }
+        currentModel.traverse((child) => {
+            if (child.name === 'edgeLines') {
+                child.visible = showEdges;
+            }
+        });
     });
 }
 
@@ -1043,6 +1201,7 @@ if (toggleGridButton) {
         }
     });
 }
+
 
 ////////////////////////////////////////////////////////////
 // カメラ視点切り替え & センタリング
@@ -1092,6 +1251,7 @@ centerButton.addEventListener('click', () => {
     
     console.log('Centered object while keeping current view angle.');
 });
+
 
 ////////////////////////////////////////////////////////////
 // Resize (OrthographicCamera用)
