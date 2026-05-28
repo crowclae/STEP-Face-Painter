@@ -3,7 +3,7 @@
 ### 📝 README.md の内容プレビュー
 
 ```markdown
-# STEP Face Viewer (FaceID Mode)
+# STEP Face Painter (FaceID Mode)
 
 OpenCascade.js (WASM) と Three.js を用いて、ブラウザ上でSTEPファイルを読み込み、フェイス（面）ごとにID（FaceID）を識別してインタラクティブにカラーペイントができるWebアプリケーションです。
 CADのように直感的な操作ができるよう、平行投影（オーソグラフィック）カメラや各軸方向からの視点切り替え、センタリング機能を備えています。
