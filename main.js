@@ -336,13 +336,34 @@ viewerContainer.addEventListener('drop', async (e) => {
 
 
 ////////////////////////////////////////////////////////////
-// STEP Loader (Solid分割・表示切替UI生成)
+// 進捗表示の更新ユーティリティ
+////////////////////////////////////////////////////////////
+async function updateProgress(text, percent = null) {
+    const loadingText = document.getElementById('loading-text');
+    const barContainer = document.getElementById('progress-bar-container');
+    const barFill = document.getElementById('progress-bar-fill');
+
+    if (loadingText) loadingText.innerText = text;
+    
+    if (percent !== null && barContainer && barFill) {
+        barContainer.style.display = 'block';
+        barFill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+    } else if (barContainer) {
+        barContainer.style.display = 'none';
+    }
+    
+    // JSのメインスレッドを一時的に解放し、ブラウザの描画（DOM更新）を強制する
+    await new Promise(resolve => setTimeout(resolve, 0));
+}
+
+////////////////////////////////////////////////////////////
+// STEP Loader (進捗表示・プログレスバー対応版)
 ////////////////////////////////////////////////////////////
 
 async function loadStepFile(file) {
     try {
         loading.style.display = 'block';
-        loading.innerText = 'Reading STEP file...';
+        await updateProgress('ファイルの読み込み中...', 5);
 
         if (currentModel) {
             scene.remove(currentModel);
@@ -363,7 +384,7 @@ async function loadStepFile(file) {
         const fileData = new Uint8Array(await file.arrayBuffer());
         oc.FS.createDataFile('/', 'model.step', fileData, true, true, true);
 
-        loading.innerText = 'Parsing STEP geometry...';
+        await updateProgress('STEPジオメトリをパース中...', 20);
 
         const reader     = new oc.STEPControl_Reader_1();
         const readResult = reader.ReadFile('model.step');
@@ -373,13 +394,16 @@ async function loadStepFile(file) {
             throw new Error('STEP read failed. Status: ' + readResult);
         }
 
+        // OpenCascade内部のトランスファー処理
         reader.TransferRoots(new oc.Message_ProgressRange_1());
         const shape = reader.OneShape();
 
-        loading.innerText = 'Tessellating shapes...';
+        await updateProgress('ポリゴンメッシュを生成中 (Tessellation)...', 40);
+        
+        // 形状の複雑さに応じて時間がかかるメッシュ化処理
         new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false);
 
-        loading.innerText = 'Building Parts and FaceID map...';
+        await updateProgress('パーツ構造を解析中...', 60);
 
         currentModel = new THREE.Group();
         currentModel.userData.name = file.name;
@@ -392,6 +416,15 @@ async function loadStepFile(file) {
         let globalFaceId = 0;
         let totalTriangles = 0;
 
+        // SOLIDの総数を事前にカウント（進捗計算用）
+        const countExplorer = new oc.TopExp_Explorer_1();
+        countExplorer.Init(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+        let totalSolids = 0;
+        while (countExplorer.More()) {
+            totalSolids++;
+            countExplorer.Next();
+        }
+
         // SOLID（塊）単位で探索してパーツを個別に構築
         const solidExplorer = new oc.TopExp_Explorer_1();
         solidExplorer.Init(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
@@ -399,6 +432,10 @@ async function loadStepFile(file) {
         let solidId = 0;
 
         while (solidExplorer.More()) {
+            // パーツごとの進捗率を計算 (60% 〜 95% の間をソリッド数で分割)
+            const currentPercent = 60 + Math.floor((solidId / (totalSolids || 1)) * 35);
+            await updateProgress(`パーツ構築中 (${solidId + 1} / ${totalSolids})...`, currentPercent);
+
             const solid = oc.TopoDS.Solid_1(solidExplorer.Current());
 
             const partPositions = [];
@@ -529,7 +566,9 @@ async function loadStepFile(file) {
             solidExplorer.Next();
         }
 
-// パーツ表示切替用チェックボックスの動的生成（mouseenter部分をアップデート）
+        await updateProgress('画面の描画を最適化中...', 98);
+
+        // パーツ表示切替用チェックボックスの動的生成
         if (partsContainer) {
             partsContainer.innerHTML = '';
             
@@ -545,7 +584,6 @@ async function loadStepFile(file) {
                     checkbox.type = 'checkbox';
                     checkbox.checked = true;
 
-                    // チェックボックスの変更イベント
                     checkbox.addEventListener('change', (e) => {
                         partGroup.visible = e.target.checked;
                         if (!e.target.checked) {
@@ -553,23 +591,16 @@ async function loadStepFile(file) {
                         }
                     });
 
-                    // ★【修正】文字列（ラベル）にマウスオーバーしたときの連動ハイライト
+                    // 文字列（ラベル）にマウスオーバーしたときの連動ハイライト
                     label.addEventListener('mouseenter', () => {
-                        // 3D側のマウスオーバーと競合しないよう一旦クリア
                         clearHighlight();
-
-                        // 選択されたパーツのMeshを取得
                         const mesh = partGroup.children.find(child => child.isMesh);
                         if (!mesh) return;
 
-                        // ★パーツ本体が非表示(checkboxがOFF)であっても、
-                        // ジオメトリを複製して独立したハイライト用メッシュをシーンに強制追加する
                         const highlightGeom = mesh.geometry.clone();
-                        
                         highlightGroup = new THREE.Group();
                         highlightGroup.name = 'dynamicHighlightGroup';
 
-                        // 非表示パーツと判別しやすいよう、少し透過度を調整（0.35）
                         const faceMat = new THREE.MeshBasicMaterial({
                             color: 0xff0000,
                             transparent: true,
@@ -586,16 +617,14 @@ async function loadStepFile(file) {
                         const highlightEdgeMesh = new THREE.LineSegments(edgesGeom, edgesMat);
                         highlightGroup.add(highlightEdgeMesh);
 
-                        // 位置や回転の同期
                         highlightGroup.position.copy(mesh.position);
                         highlightGroup.rotation.copy(mesh.rotation);
                         highlightGroup.scale.copy(mesh.scale);
-                        highlightGroup.scale.multiplyScalar(1.0005); // チラつき（Z-fighting）防止
+                        highlightGroup.scale.multiplyScalar(1.0005);
 
                         scene.add(highlightGroup);
                     });
 
-                    // マウスが離れたらハイライトを消去
                     label.addEventListener('mouseleave', () => {
                         clearHighlight();
                     });
@@ -611,12 +640,18 @@ async function loadStepFile(file) {
         triCountLabel.innerText = totalTriangles.toLocaleString();
 
         triggerAutoFit();
-        loading.style.display = 'none';
+        
+        await updateProgress('インポート完了！', 100);
+        setTimeout(() => {
+            loading.style.display = 'none';
+        }, 300);
+
         console.log(`STEP loaded by Solid: ${solidId} genuine parts found, ${globalFaceId} total faces.`);
 
     } catch (err) {
         console.error(err);
-        loading.innerText = `❌ Load failed: ${err.message}`;
+        const loadingText = document.getElementById('loading-text');
+        if (loadingText) loadingText.innerText = `❌ 読み込み失敗: ${err.message}`;
     }
 }
 
