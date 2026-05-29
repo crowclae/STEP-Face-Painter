@@ -234,7 +234,7 @@
         #right-sidebar {
             right: 16px;
             width: 260px;
-            top: 110px; /* 情報ボックスと被らないように配置 */
+            top: 145px; /* 情報ボックスと被らないように配置 */
             max-height: calc(100vh - 130px);
         }
 
@@ -501,7 +501,7 @@
 
     <div id="parts-menu" class="floating-panel">
         <div id="parts-menu-header">
-            <span class="panel-title">パーツ表示切替</span>
+            <span class="panel-title">パーツ表示切替 (クリックで開閉)</span>
             <span id="parts-menu-toggle-icon">▲</span>
         </div>
         <div id="parts-menu-content">
@@ -587,9 +587,14 @@
     </div>
 
     <div id="info-box">
-        Face ID: <span id="faceId">—</span><br>
-        Surface: <span id="meshName">—</span><br>
-        Triangles: <span id="triCount">—</span>
+        <div style="margin-bottom: 6px;">
+            Face ID: <span id="faceId">—</span><br>
+            Surface: <span id="meshName">—</span><br>
+            Triangles: <span id="triCount">—</span>
+        </div>
+        <button id="btn-trigger-launcher" style="width: 100%; background: #3b82f6; color: white; border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; cursor: pointer; transition: background 0.2s; outline: none;">
+            🚀 クイックツール [ESC / Space]
+        </button>
     </div>
 
     <button id="mode-badge" style="cursor: pointer; pointer-events: auto; transition: background 0.2s, border-color 0.2s;" title="クリックしてスクリーンショットを保存">
@@ -613,5 +618,104 @@
 </div>
 
 <script type="module" src="./main.js"></script>
+<div id="launcher-overlay" class="launcher-overlay">
+    <div class="launcher-window">
+        <h3>🚀 クイックツールランチャー</h3>
+        <p class="launcher-tip">選択または番号キー [1〜3] を押してください</p>
+        <div class="launcher-buttons">
+            <button class="launcher-btn" id="btn-tool-measure" data-index="1">📏 1. 距離測定 (ON/OFF)</button>
+            <button class="launcher-btn" id="btn-tool-clipping" data-index="2">✂️ 2. 断面切断表示 (ON/OFF)</button>
+            <button class="launcher-btn" id="btn-tool-memo" data-index="3">📝 3. メモ帳モード (ON/OFF)</button>
+        </div>
+    </div>
+</div>
+
+<div id="pop-memo-window" style="position: absolute; background: rgba(20, 20, 30, 0.95); border: 1px solid #f1c40f; border-radius: 8px; padding: 8px; width: 220px; display: none; z-index: 500; box-shadow: 0 10px 25px rgba(0,0,0,0.6);">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; border-bottom: 1px solid #444; padding-bottom: 2px;">
+        <span style="color: #f1c40f; font-size: 11px; font-weight: bold;">📝 3D位置メモ</span>
+        <button id="btn-close-pop-memo" style="background: transparent; color: #888; border: none; cursor: pointer; font-size: 12px;">×</button>
+    </div>
+    <textarea id="pop-memo-textarea" style="width: 100%; height: 70px; background: #111; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 4px; resize: none; font-size: 12px; outline: none;" placeholder="メモを入力... [ESCで閉じる]"></textarea>
+</div>
+
+<div id="tool-status-badge" style="position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(231, 76, 60, 0.9); color: white; padding: 6px 16px; border-radius: 20px; font-size: 12px; font-weight: bold; display: none; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: none;">
+</div>
+
+<div id="memo-panel" class="sidebar-panel launcher-sub-panel" style="display:none; left: 16px; top: 380px; width: 220px; height: 240px; z-index: 100;">
+    <h2>📝 塗装・モデルメモ</h2>
+    <textarea id="memo-textarea" style="width:100%; height:130px; background:#111; color:#fff; border:1px solid #444; border-radius:6px; padding:6px; resize:none; font-size:12px;" placeholder="ここにメモを残せます..."></textarea>
+    <button class="action-btn" id="btn-close-memo" style="margin-top:2px;">閉じる</button>
+</div>
+
+<div id="measure-label" style="position: absolute; bottom: 60px; right: 20px; background: rgba(20,20,28,0.9); border: 1px solid #e74c3c; padding: 10px 14px; border-radius: 6px; font-size: 13px; color: #fff; display: none; z-index: 20; pointer-events: none; min-width: 240px; line-height: 1.5;">
+    <div style="border-bottom: 1px solid #444; padding-bottom: 4px; margin-bottom: 6px; font-weight: bold; color: #e74c3c;">📏 測定モード (2面をクリック)</div>
+    <div id="measure-text">距離: ---</div>
+    <div id="measure-xyz-text" style="font-size: 11px; color: #aaa; margin-top: 4px; display: none;"></div>
+</div>
+
+<div id="main-clipping-panel" style="position: absolute; bottom: 60px; left: 20px; background: rgba(20, 20, 28, 0.95); border: 1px solid #7dd3fc; padding: 14px; border-radius: 8px; font-size: 12px; color: #fff; display: none; z-index: 100; width: 280px; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+    <div style="font-weight: bold; color: #7dd3fc; margin-bottom: 10px; border-bottom: 1px solid #334; padding-bottom: 4px;">✂️ 断面カットコントローラー</div>
+    
+    <div style="margin-bottom: 10px;">
+        <label style="color:#aaa; display:block; margin-bottom:4px;">切断軸 (法線):</label>
+        <div style="display: flex; gap: 6px;">
+            <button class="action-btn clip-axis-btn active-axis" id="clip-axis-x" style="flex:1; padding:4px;">X軸</button>
+            <button class="action-btn clip-axis-btn" id="clip-axis-y" style="flex:1; padding:4px;">Y軸</button>
+            <button class="action-btn clip-axis-btn" id="clip-axis-z" style="flex:1; padding:4px;">Z軸</button>
+        </div>
+    </div>
+
+    <div style="margin-bottom: 10px;">
+        <div style="display:flex; justify-content:between; margin-bottom:2px;">
+            <span style="color:#aaa;">位置 (距離):</span>
+            <span id="clip-dist-val" style="color:#7dd3fc; font-weight:bold; margin-left:auto;">0.00</span>
+        </div>
+        <input type="range" id="clip-slider-dist" min="-100" max="100" step="0.5" value="0" style="width:100%; cursor:pointer;">
+    </div>
+
+    <div style="margin-bottom: 6px;">
+        <div style="display:flex; justify-content:between; margin-bottom:2px;">
+            <span style="color:#aaa;">傾き (角度):</span>
+            <span id="clip-angle-val" style="color:#5af5a2; font-weight:bold; margin-left:auto;">0°</span>
+        </div>
+        <input type="range" id="clip-slider-angle" min="-180" max="180" step="1" value="0" style="width:100%; cursor:pointer;">
+    </div>
+</div>
+
+<style>
+    /* ランチャースタイル */
+    .launcher-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(4px);
+        z-index: 9999;
+        display: none;
+        align-items: center;
+        justify-content: center;
+    }
+    .launcher-overlay.active { display: flex; }
+    .launcher-window {
+        background: rgba(20, 20, 30, 0.96);
+        border: 2px solid #556;
+        border-radius: 16px;
+        padding: 24px;
+        width: 360px;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+        text-align: center;
+    }
+    .launcher-window h3 { color: #7dd3fc; font-size: 16px; margin-bottom: 4px; }
+    .launcher-tip { font-size: 11px; color: #778; margin-bottom: 20px; }
+    .launcher-buttons { display: flex; flex-direction: column; gap: 12px; }
+    .launcher-btn {
+        background: #2e2e3e; color: #fff; border: 1px solid #445; padding: 12px;
+        border-radius: 8px; font-size: 13px; cursor: pointer; text-align: left;
+    }
+    .launcher-btn:hover { background: #3b3b54; border-color: #7dd3fc; }
+    
+    /* 断面軸ボタンのアクティブ表現 */
+    .clip-axis-btn { background: #223; color: #889; border: 1px solid #445; }
+    .clip-axis-btn.active-axis { background: #0284c7 !important; color: #fff !important; border-color: #7dd3fc !important; font-weight: bold; }
+</style>
 </body>
 </html>

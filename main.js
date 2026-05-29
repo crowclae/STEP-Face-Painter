@@ -9,6 +9,8 @@
 //  - 各パーツ・面ごとの独立したカラー保存・復元（JSON）に対応
 //  - 別モデルのJSON読み込みを拒否するバリデーション機能
 //  - 折りたたみ式のパーツ表示切替UI（一括操作対応）
+//  - [追加] 距離測定（最短＋XYZ軸距離）＆測定時のペイント一時停止ガード
+//  - [追加] 3軸・角度・距離対応の高機能メイン画面連携断面切断表示
 ////////////////////////////////////////////////////////////
 
 
@@ -57,6 +59,30 @@ const partsMenuHeader   = document.getElementById('parts-menu-header');
 const partsContainer    = document.getElementById('partsContainer');
 const btnCheckAll       = document.getElementById('btn-check-all');
 const btnUncheckAll     = document.getElementById('btn-uncheck-all');
+
+// ==========================================
+// 🚀 新設：ランチャー・ツール機能用 UIエレメント
+// ==========================================
+const launcherOverlay      = document.getElementById('launcher-overlay');
+const btnToolMeasure       = document.getElementById('btn-tool-measure');
+const btnToolClipping      = document.getElementById('btn-tool-clipping');
+const btnToolMemo          = document.getElementById('btn-tool-memo');
+const memoPanel            = document.getElementById('memo-panel');
+const memoTextarea         = document.getElementById('memo-textarea');
+const btnCloseMemo         = document.getElementById('btn-close-memo');
+const measureLabel         = document.getElementById('measure-label');
+const measureText          = document.getElementById('measure-text');
+const measureXyzText       = document.getElementById('measure-xyz-text');
+
+// 👑 新設：メイン画面断面コントロールパネル
+const mainClippingPanel    = document.getElementById('main-clipping-panel');
+const clipAxisX            = document.getElementById('clip-axis-x');
+const clipAxisY            = document.getElementById('clip-axis-y');
+const clipAxisZ            = document.getElementById('clip-axis-z');
+const clipSliderDist       = document.getElementById('clip-slider-dist');
+const clipSliderAngle      = document.getElementById('clip-slider-angle');
+const clipDistVal          = document.getElementById('clip-dist-val');
+const clipAngleVal         = document.getElementById('clip-angle-val');
 
 
 ////////////////////////////////////////////////////////////
@@ -131,6 +157,7 @@ const presetColors = [
 // 右側メニューのTag入力用UIを動的に生成
 ////////////////////////////////////////////////////////////
 function initTagFields() {
+    if (!tagFieldsContainer) return;
     tagFieldsContainer.innerHTML = '';
     presetColors.forEach((preset, index) => {
         const row = document.createElement('div');
@@ -236,6 +263,9 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
 
+// 👑 ローカルクリッピングの有効化
+renderer.localClippingEnabled = true;
+
 
 ////////////////////////////////////////////////////////////
 // Controls
@@ -278,9 +308,22 @@ let showEdges       = true;
 let showGrid        = true;
 let hoveredFaceId   = null;   // 現在ホバーしているFaceID
 let highlightGroup  = null;   // ハイライト表示用のコンテナ
-colorPicker.value = '#e74c3c';
+if (colorPicker) colorPicker.value = '#e74c3c';
 let isPaintingSession = false;
 let paintChangedThisSession = false;
+
+// 🚀 拡張機能用の内部ステート
+let isLauncherOpen = false;
+let isMeasureMode = false;
+let isClippingMode = false;
+
+let measurePoints = [];
+let measureVisualLine = null;
+let measureMarkers = [];
+
+let currentClipAxis = 'X';
+const localPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
+
 
 ////////////////////////////////////////////////////////////
 // opencascade.js 初期化
@@ -366,6 +409,9 @@ async function loadStepFile(file) {
         loading.style.display = 'block';
         await updateProgress('ファイルの読み込み中...', 5);
 
+        clearAllMemos(); 
+
+
         if (currentModel) {
             scene.remove(currentModel);
             currentModel.traverse((child) => {
@@ -375,6 +421,19 @@ async function loadStepFile(file) {
                 }
             });
             currentModel = null;
+        }
+
+        // 断面表示モード中だった場合は、パネルとマテリアルクリッピングをリセット
+        if (isClippingMode) {
+            isClippingMode = false;
+            if (btnToolClipping) btnToolClipping.style.background = '';
+            if (mainClippingPanel) mainClippingPanel.style.display = 'none';
+        }
+        if (isMeasureMode) {
+            isMeasureMode = false;
+            if (btnToolMeasure) btnToolMeasure.style.background = '';
+            if (measureLabel) measureLabel.style.display = 'none';
+            clearMeasure();
         }
 
         if (partsContainer) partsContainer.innerHTML = '';
@@ -692,13 +751,11 @@ function checkAndPaint(clientX, clientY) {
     const vertexIndex = indexAttr.getX(hitTriangle * 3);
     const faceIdVal   = Math.round(faceIdAttr.getX(vertexIndex));
 
-    faceIdLabel.innerText   = faceIdVal;
-    meshNameLabel.innerText = `Face_${faceIdVal}`;
+    if (faceIdLabel) faceIdLabel.innerText   = faceIdVal;
+    if (meshNameLabel) meshNameLabel.innerText = `Face_${faceIdVal}`;
 
     const paintModeElement = document.querySelector('input[name="paintMode"]:checked');
     const paintMode = paintModeElement ? paintModeElement.value : 'face';
-
-    //if (isFirstClick) saveHistory();
 
     // 最初の実変更時だけ履歴保存
     if (!paintChangedThisSession) {
@@ -872,6 +929,9 @@ function clearHighlight() {
 ////////////////////////////////////////////////////////////
 
 canvas.addEventListener('pointerdown', (e) => {
+    // 距離測定モード有効時は、ペイント判定用のpointerdown発火をスキップ
+    if (isMeasureMode) return;
+
     if (e.button === 0 && !e.shiftKey && !e.ctrlKey) {
 
         isLeftMouseDown = true;
@@ -881,7 +941,6 @@ canvas.addEventListener('pointerdown', (e) => {
         isPaintingSession = true;
         paintChangedThisSession = false;
 
-    
         checkAndPaint(e.clientX, e.clientY);
     } else {
         isRotating = true;
@@ -889,6 +948,8 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
+    if (isMeasureMode) return;
+
     if (isLeftMouseDown && !isRotating) {
         controls.enabled = false;
         checkAndPaint(e.clientX, e.clientY);
@@ -906,6 +967,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 const stopPainting = () => {
+    if (isMeasureMode) return;
     isLeftMouseDown  = false;
     isRotating       = false;
     controls.enabled = true;
@@ -924,13 +986,15 @@ canvas.addEventListener('pointerleave', stopPainting);
 // Palette
 ////////////////////////////////////////////////////////////
 
-colorPicker.addEventListener('input', (e) => {
-    console.log('Brush color:', e.target.value);
-});
+if (colorPicker) {
+    colorPicker.addEventListener('input', (e) => {
+        console.log('Brush color:', e.target.value);
+    });
+}
 
 document.querySelectorAll('.palette-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
-        colorPicker.value = e.currentTarget.getAttribute('data-color');
+        if (colorPicker) colorPicker.value = e.currentTarget.getAttribute('data-color');
     });
 });
 
@@ -964,33 +1028,35 @@ function saveHistory() {
     }
 }
 
-undoButton.addEventListener('click', () => {
-    if (!colorHistory.length || !currentModel) return;
+if (undoButton) {
+    undoButton.addEventListener('click', () => {
+        if (!colorHistory.length || !currentModel) return;
 
-    const snapshot = colorHistory.pop();
+        const snapshot = colorHistory.pop();
 
-    snapshot.forEach((entry) => {
-        const mesh = currentModel.getObjectByProperty('uuid', entry.meshUUID);
+        snapshot.forEach((entry) => {
+            const mesh = currentModel.getObjectByProperty('uuid', entry.meshUUID);
 
-        if (!mesh || !mesh.isMesh) return;
+            if (!mesh || !mesh.isMesh) return;
 
-        const attr = mesh.geometry?.attributes?.color;
+            const attr = mesh.geometry?.attributes?.color;
 
-        if (!attr) return;
+            if (!attr) return;
 
-        // サイズ不一致防止
-        if (attr.array.length !== entry.colors.length) {
-            console.warn(
-                'Undo skipped due to size mismatch:',
-                mesh.name
-            );
-            return;
-        }
+            // サイズ不一致防止
+            if (attr.array.length !== entry.colors.length) {
+                console.warn(
+                    'Undo skipped due to size mismatch:',
+                    mesh.name
+                );
+                return;
+            }
 
-        attr.array.set(entry.colors);
-        attr.needsUpdate = true;
+            attr.array.set(entry.colors);
+            attr.needsUpdate = true;
+        });
     });
-});
+}
 
 
 ////////////////////////////////////////////////////////////
@@ -1002,147 +1068,198 @@ gridHelper.name = 'gridHelper';
 scene.add(gridHelper);
 
 
-////////////////////////////////////////////////////////////
-// Save / Load Color JSON (バリデーションチェック機能付き)
-////////////////////////////////////////////////////////////
+// ============================================================
+// 💾 ① カラー ・ タグ ・ 複数メモデータの統合保存 (JSONエクスポート)
+// ============================================================
+if (saveColorsButton) {
+    saveColorsButton.addEventListener('click', () => {
+        if (!currentModel) { alert('モデルが読み込まれていません。'); return; }
 
-saveColorsButton.addEventListener('click', () => {
-    if (!currentModel) { alert('モデルが読み込まれていません。'); return; }
+        const faceColorMap = {};
+        let totalVerticesProcessed = 0;
 
-    const faceColorMap = {};
-    let totalVerticesProcessed = 0;
+        // 1. モデルの全メッシュの頂点属性から現在のFaceカラーを動的抽出
+        currentModel.traverse((child) => {
+            if (child.isMesh) {
+                const geometry = child.geometry;
+                const colorAttr = geometry?.attributes?.color;
+                const faceIdAttr = geometry?.attributes?.faceId;
 
-    currentModel.traverse((child) => {
-        if (child.isMesh) {
-            const geometry = child.geometry;
-            const colorAttr = geometry?.attributes?.color;
-            const faceIdAttr = geometry?.attributes?.faceId;
+                if (colorAttr && faceIdAttr) {
+                    const vertexCount = colorAttr.count;
 
-            if (colorAttr && faceIdAttr) {
-                const vertexCount = colorAttr.count;
+                    for (let i = 0; i < vertexCount; i++) {
+                        const fId = Math.round(faceIdAttr.getX(i));
+                        if (faceColorMap[fId] !== undefined) continue;
 
-                for (let i = 0; i < vertexCount; i++) {
-                    const fId = Math.round(faceIdAttr.getX(i));
-                    if (faceColorMap[fId] !== undefined) continue;
-
-                    const r = colorAttr.getX(i);
-                    const g = colorAttr.getY(i);
-                    const b = colorAttr.getZ(i);
-                    const color = new THREE.Color(r, g, b);
-                    faceColorMap[fId] = "#" + color.getHexString();
+                        const r = colorAttr.getX(i);
+                        const g = colorAttr.getY(i);
+                        const b = colorAttr.getZ(i);
+                        const color = new THREE.Color(r, g, b);
+                        faceColorMap[fId] = "#" + color.getHexString();
+                    }
+                    totalVerticesProcessed += vertexCount;
                 }
-                totalVerticesProcessed += vertexCount;
             }
+        });
+
+        if (Object.keys(faceColorMap).length === 0) {
+            alert('カラーデータまたはFaceIDデータが見つかりませんでした。');
+            return;
         }
-    });
 
-    if (Object.keys(faceColorMap).length === 0) {
-        alert('カラーデータまたはFaceIDデータが見つかりませんでした。');
-        return;
-    }
-
-    const tagsData = presetColors.map((_, index) => {
-        const inputEl = document.getElementById(`tag-input-${index}`);
-        return inputEl ? inputEl.value : '';
-    });
-
-    const modelName = currentModel.userData.name || "model.step";
-    const exportData = {
-        application: "STEP Face Viewer – FaceID Mode",
-        timestamp: Date.now(),
-        fileName: modelName,
-        faceColors: faceColorMap, 
-        tags: tagsData
-    };
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-    const a = Object.assign(document.createElement('a'), {
-        href: URL.createObjectURL(blob),
-        download: 'step-colors.json',
-    });
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(a.href);
-    
-    console.log(`Color mapping saved successfully. Map size: ${Object.keys(faceColorMap).length}`);
-});
-
-importColorsFile.addEventListener('change', (e) => {
-    if (!currentModel) {
-        alert('最初に STEP ファイルを読み込んでください。');
-        e.target.value = '';
-        return;
-    }
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        try {
-            const data = JSON.parse(ev.target.result);
-
-            if (!data.faceColors) {
-                alert('互換性のない形式のJSONファイルです（faceColorsが含まれていません）。');
-                return;
-            }
-
-            // 【バリデーションチェック】Face数が異なる別モデルからの読み込みを拒否
-            const currentTotalFaces = faceGroupMap.size;
-            const jsonTotalFaces = Object.keys(data.faceColors).length;
-
-            if (currentTotalFaces !== jsonTotalFaces) {
-                alert(`❌ 異なるモデルのカラーデータです。\n\n現在のモデルのFace数: ${currentTotalFaces}\nJSONのFace数: ${jsonTotalFaces}\n\n読み込みを中止しました。`);
-                e.target.value = '';
-                return; 
-            }
-
-            currentModel.traverse((child) => {
-                if (child.isMesh) saveHistory(child);
+        // 2. プリセット対応のカラータグ入力欄からテキストを収集
+        let tagsData = [];
+        if (typeof presetColors !== 'undefined' && Array.isArray(presetColors)) {
+            tagsData = presetColors.map((_, index) => {
+                const inputEl = document.getElementById(`tag-input-${index}`);
+                return inputEl ? inputEl.value : '';
             });
+        }
 
-            const tempColor = new THREE.Color();
-            let appliedCount = 0;
+        // 3. 3Dポップアップメモデータのシリアライズ
+        let serializedMemos = [];
+        if (typeof memoList !== 'undefined' && Array.isArray(memoList)) {
+            serializedMemos = memoList.map(memo => {
+                const pt = memo.point || { x: 0, y: 0, z: 0 };
+                return {
+                    point: { x: pt.x, y: pt.y, z: pt.z },
+                    text: memo.text || ''
+                };
+            });
+        }
 
-            currentModel.traverse((child) => {
-                if (child.isMesh) {
-                    const geometry = child.geometry;
-                    const colorAttr = geometry?.attributes?.color;
-                    const faceIdAttr = geometry?.attributes?.faceId;
+        const modelName = currentModel.userData.name || "model.step";
 
-                    if (colorAttr && faceIdAttr) {
-                        const vertexCount = colorAttr.count;
-                        for (let i = 0; i < vertexCount; i++) {
-                            const fId = Math.round(faceIdAttr.getX(i));
-                            const targetHex = data.faceColors[fId];
+        // 👑 元の構造（faceColors, tags）を完全に保ったまま、memosを追加して一本化
+        const exportData = {
+            application: "STEP Face Viewer – FaceID Mode",
+            timestamp: Date.now(),
+            fileName: modelName,
+            faceColors: faceColorMap, // 🎨 Faceカラーマッピング情報
+            tags: tagsData,           // 🏷️ カラータグ情報
+            memos: serializedMemos    // 📝 複数3Dメモ情報
+        };
 
-                            if (targetHex !== undefined) {
-                                tempColor.set(targetHex);
-                                colorAttr.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
-                                appliedCount++;
-                            }
-                        }
-                        colorAttr.needsUpdate = true;
+        // ファイルとしてダウンロード出力
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const a = Object.assign(document.createElement('a'), {
+            href: URL.createObjectURL(blob),
+            download: 'step-colors-and-memos.json',
+        });
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        
+        console.log(`Color mapping and memos saved successfully. Map size: ${Object.keys(faceColorMap).length}, Memos: ${serializedMemos.length}`);
+    });
+}
+
+// ============================================================
+// 📥 ② カラー ・ タグ ・ 複数メモデータの統合読み込み (JSONインポート)
+// ============================================================
+if (importColorsFile) {
+    importColorsFile.addEventListener('change', (e) => {
+        if (!currentModel) {
+            alert('最初に STEP ファイルを読み込んでください。');
+            e.target.value = '';
+            return;
+        }
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const data = JSON.parse(ev.target.result);
+
+                if (!data.faceColors) {
+                    alert('互換性のない形式のJSONファイルです（faceColorsが含まれていません）。');
+                    return;
+                }
+
+                // 👑 【元コード準拠】Face数が異なる別モデルからの読み込みを安全に拒否するバリデーション
+                if (typeof faceGroupMap !== 'undefined' && faceGroupMap.size > 0) {
+                    const currentTotalFaces = faceGroupMap.size;
+                    const jsonTotalFaces = Object.keys(data.faceColors).length;
+
+                    if (currentTotalFaces !== jsonTotalFaces) {
+                        alert(`❌ 異なるモデルのカラーデータです。\n\n現在のモデルのFace数: ${currentTotalFaces}\nJSONのFace数: ${jsonTotalFaces}\n\n読み込みを中止しました。`);
+                        e.target.value = '';
+                        return; 
                     }
                 }
-            });
 
-            if (data.tags && Array.isArray(data.tags)) {
-                data.tags.forEach((tagText, index) => {
-                    const inputEl = document.getElementById(`tag-input-${index}`);
-                    if (inputEl) inputEl.value = tagText || '';
+                // 履歴の保存（アンドゥ用）
+                currentModel.traverse((child) => {
+                    if (child.isMesh && typeof saveHistory === 'function') saveHistory(child);
                 });
-            }
 
-            alert('FaceIDマッピングに基づき、カラーデータを復元しました。');
-        } catch (err) {
-            console.error(err);
-            alert('JSON 読み込み失敗: ' + err.message);
-        }
-        e.target.value = '';
-    };
-    reader.readAsText(file);
-});
+                // 1. カラーデータの復元（各頂点属性へ再流し込み）
+                const tempColor = new THREE.Color();
+                currentModel.traverse((child) => {
+                    if (child.isMesh) {
+                        const geometry = child.geometry;
+                        const colorAttr = geometry?.attributes?.color;
+                        const faceIdAttr = geometry?.attributes?.faceId;
+
+                        if (colorAttr && faceIdAttr) {
+                            const vertexCount = colorAttr.count;
+                            for (let i = 0; i < vertexCount; i++) {
+                                const fId = Math.round(faceIdAttr.getX(i));
+                                const targetHex = data.faceColors[fId];
+
+                                if (targetHex !== undefined) {
+                                    tempColor.set(targetHex);
+                                    colorAttr.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
+                                }
+                            }
+                            colorAttr.needsUpdate = true;
+                        }
+                    }
+                });
+
+                // 2. カラータグ情報の復元
+                if (data.tags && Array.isArray(data.tags)) {
+                    data.tags.forEach((tagText, index) => {
+                        const inputEl = document.getElementById(`tag-input-${index}`);
+                        if (inputEl) inputEl.value = tagText || '';
+                    });
+                }
+
+                // 3. 👑 3Dポップアップメモ情報の完全復元
+                if (typeof clearAllMemos === 'function') {
+                    clearAllMemos(); // 既存のメモを画面とメモリから一度リセット
+                }
+
+                if (data.memos && Array.isArray(data.memos) && typeof restoreMemoFromData === 'function') {
+                    data.memos.forEach(memoData => {
+                        if (memoData.point) {
+                            const position = new THREE.Vector3(memoData.point.x, memoData.point.y, memoData.point.z);
+                            // 以前作成した復元用ヘルパーで、ピンとウィンドウを再ビルド
+                            restoreMemoFromData(position, memoData.text || '');
+                        }
+                    });
+                }
+
+                // 現在のメモモードの起動状態にあわせて、インポートしたミニウィンドウの表示状態を即時同期
+                if (typeof isMemoMode !== 'undefined' && isMemoMode) {
+                    if (typeof showAllMemoElements === 'function') showAllMemoElements();
+                } else {
+                    if (typeof hideAllMemoElements === 'function') hideAllMemoElements();
+                }
+
+                alert('FaceIDマッピングに基づき、カラーデータ・タグ・メモ情報を完全復元しました。');
+            } catch (err) {
+                console.error(err);
+                alert('JSON 読み込み失敗: ' + err.message);
+            }
+            e.target.value = '';
+        };
+        reader.readAsText(file);
+    });
+}
 
 
 ////////////////////////////////////////////////////////////
@@ -1186,10 +1303,12 @@ function triggerAutoFit() {
     controls.saveState(); 
 }
 
-resetViewButton.addEventListener('click', () => {
-    triggerAutoFit();
-    console.log('View reset: Direction and camera.zoom re-fitted perfectly.');
-});
+if (resetViewButton) {
+    resetViewButton.addEventListener('click', () => {
+        triggerAutoFit();
+        console.log('View reset: Direction and camera.zoom re-fitted perfectly.');
+    });
+}
 
 
 ////////////////////////////////////////////////////////////
@@ -1315,28 +1434,30 @@ function setCameraDirection(axis, sign) {
     controls.update();
 }
 
-viewPosXBtn.addEventListener('click', () => setCameraDirection('x', 1));
-viewNegXBtn.addEventListener('click', () => setCameraDirection('x', -1));
-viewPosYBtn.addEventListener('click', () => setCameraDirection('y', 1));
-viewNegYBtn.addEventListener('click', () => setCameraDirection('y', -1));
-viewPosZBtn.addEventListener('click', () => setCameraDirection('z', 1));
-viewNegZBtn.addEventListener('click', () => setCameraDirection('z', -1));
+if (viewPosXBtn) viewPosXBtn.addEventListener('click', () => setCameraDirection('x', 1));
+if (viewNegXBtn) viewNegXBtn.addEventListener('click', () => setCameraDirection('x', -1));
+if (viewPosYBtn) viewPosYBtn.addEventListener('click', () => setCameraDirection('y', 1));
+if (viewNegYBtn) viewNegYBtn.addEventListener('click', () => setCameraDirection('y', -1));
+if (viewPosZBtn) viewPosZBtn.addEventListener('click', () => setCameraDirection('z', 1));
+if (viewNegZBtn) viewNegZBtn.addEventListener('click', () => setCameraDirection('z', -1));
 
-centerButton.addEventListener('click', () => {
-    if (!currentModel || !controls) return;
+if (centerButton) {
+    centerButton.addEventListener('click', () => {
+        if (!currentModel || !controls) return;
 
-    const box = new THREE.Box3().setFromObject(currentModel);
-    const newCenter = box.getCenter(new THREE.Vector3());
+        const box = new THREE.Box3().setFromObject(currentModel);
+        const newCenter = box.getCenter(new THREE.Vector3());
 
-    const oldCenter = controls.target.clone();
-    const offset = new THREE.Vector3().subVectors(newCenter, oldCenter);
+        const oldCenter = controls.target.clone();
+        const offset = new THREE.Vector3().subVectors(newCenter, oldCenter);
 
-    camera.position.add(offset);
-    controls.target.copy(newCenter);
-    controls.update();
-    
-    console.log('Centered object while keeping current view angle.');
-});
+        camera.position.add(offset);
+        controls.target.copy(newCenter);
+        controls.update();
+        
+        console.log('Centered object while keeping current view angle.');
+    });
+}
 
 
 ////////////////////////////////////////////////////////////
@@ -1353,14 +1474,733 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
+// ============================================================
+// 👑 拡張機能用：追加ステート（複数メモ・永続管理化）
+// ============================================================
+let isMemoMode = false;         // メモ配置モードがONか
+let memoList = [];              // 登録されたメモの配列 { id, point, text, marker, element }
+
+const toolStatusBadge = document.getElementById('tool-status-badge');
+
+// ============================================================
+// 📏 モード管理 ＆ 排他制御 ＆ 状態表示ユーティリティ
+// ============================================================
+function updateToolStatusUI() {
+    if (!toolStatusBadge) return;
+    
+    if (isMeasureMode) {
+        toolStatusBadge.innerText = "📏 距離測定モード有効 (モデル上をクリック / [ESC] で解除)";
+        toolStatusBadge.style.background = "rgba(231, 76, 60, 0.95)"; 
+        toolStatusBadge.style.color = "#fff";
+        toolStatusBadge.style.display = "block";
+    } else if (isMemoMode) {
+        toolStatusBadge.innerText = "📝 メモ配置モード有効 (モデル面をクリックして複数設置 / [ESC] で解除)";
+        toolStatusBadge.style.background = "rgba(241, 196, 15, 0.95)"; 
+        toolStatusBadge.style.color = "#111";
+        toolStatusBadge.style.display = "block";
+    } else {
+        toolStatusBadge.style.display = "none";
+        toolStatusBadge.style.color = "#fff";
+    }
+}
+
+// 距離測定モードの切り替え（メモとは排他）
+function toggleMeasureMode(forceState = null) {
+    isMeasureMode = forceState !== null ? forceState : !isMeasureMode;
+    if (isMeasureMode) {
+        toggleMemoMode(false); // メモモードは強制終了
+        if (measureLabel) measureLabel.style.display = 'block';
+        if (btnToolMeasure) btnToolMeasure.style.background = '#b45309';
+        clearMeasure();
+    } else {
+        if (measureLabel) measureLabel.style.display = 'none';
+        if (btnToolMeasure) btnToolMeasure.style.background = '';
+        clearMeasure();
+    }
+    updateToolStatusUI();
+}
+
+// メモモードの切り替え（距離測定とは排他）
+function toggleMemoMode(forceState = null) {
+    isMemoMode = forceState !== null ? forceState : !isMemoMode;
+    if (isMemoMode) {
+        toggleMeasureMode(false); // 距離測定モードは強制終了
+        if (btnToolMemo) btnToolMemo.style.background = '#b45309';
+        // 💡 再びONになったとき、既存のすべてのメモUI（ミニウィンドウ）を再表示
+        showAllMemoElements();
+    } else {
+        if (btnToolMemo) btnToolMemo.style.background = '';
+        // 💡 モードOFFの時は、画面が煩雑にならないようメモUI（ミニウィンドウ）を一旦すべて非表示
+        hideAllMemoElements();
+    }
+    updateToolStatusUI();
+}
+
+// メモUI要素の全非表示
+function hideAllMemoElements() {
+    memoList.forEach(memo => {
+        if (memo.element) memo.element.style.display = 'none';
+    });
+}
+
+// メモUI要素の全表示（位置も即時更新）
+function showAllMemoElements() {
+    memoList.forEach(memo => {
+        if (memo.element) {
+            memo.element.style.display = 'block';
+            updateSingleMemoPosition(memo);
+        }
+    });
+}
+
+// ============================================================
+// 🛠️ イベント割り込み・完全ガード (距離測定 OR メモモード時にペイントを阻止)
+// ============================================================
+const preventPaintHandler = (e) => {
+    if (isMeasureMode || isMemoMode) {
+        e.stopPropagation();
+    }
+};
+canvas.addEventListener('mousedown', preventPaintHandler, true);
+canvas.addEventListener('mouseup', preventPaintHandler, true);
+canvas.addEventListener('click', preventPaintHandler, true);
+
+// ============================================================
+// 📱 タッチデバイス専用：高度な操作挙動最適化ロジック
+// ============================================================
+
+let isTouchingModel = false;    // タッチ開始時にモデルの上にいたか
+let lastTouchPos = { x: 0, y: 0 };
+
+// タッチデバイスかどうかを判定する簡易関数
+function isTouchDevice(e) {
+    return e.touches && e.touches.length > 0;
+}
+
+// スクリーン座標からレイキャストを実行し、モデルとの交差を返すヘルパー
+function getTouchIntersect(touch) {
+    if (!currentModel) return null;
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersects = raycaster.intersectObjects(currentModel.children, true);
+    return intersects.find(hit => hit.object.isMesh);
+}
+
+// --- ① タッチ開始 (touchstart) ---
+canvas.addEventListener('touchstart', (e) => {
+    // 距離測定・メモモードがONの時は、競合を防ぐため既存の特殊処理に委ねる
+    if (isMeasureMode || isMemoMode) return;
+
+    if (e.touches.length === 1) {
+        // 1本指タッチの場合
+        const touch = e.touches[0];
+        lastTouchPos = { x: touch.clientX, y: touch.clientY };
+        
+        const intersect = getTouchIntersect(touch);
+
+        if (intersect) {
+            // A. モデルの上でタッチ開始 → 「タップで色付け / スワイプで連続色付け」モード
+            isTouchingModel = true;
+            
+            // OrbitControlsが勝手にカメラを回転させないように一時ロック
+            controls.enableRotate = false;
+            
+            // 即座に最初の1点をペイント（タップ色付け対応）
+            e.stopPropagation();
+            e.preventDefault();
+            
+            // 既存のペイント関数(例: paintFace など)があれば呼び出し
+            // ※ もしpointerdown等の共通処理がある場合は、そちらのロジックに流すかここで色を直接変えます
+            if (typeof onPointerDown === 'function') {
+                // 内部のRaycastやマウスクリックイベントを擬似的にシミュレート、または下記のように直接処理
+                handleSinglePaint(intersect);
+            } else {
+                handleSinglePaint(intersect);
+            }
+        } else {
+            // B. 何もない空間でタッチ開始 → 「パン移動（移動中は色付けしない）」
+            isTouchingModel = false;
+            controls.enableRotate = false; // 1本指での回転を禁止
+            controls.enablePan = true;     // 1本指でのパンを許可
+            
+            // OrbitControlsの内部ステートを一時的に「1本指＝パン移動」に書き換える
+            controls.touches.ONE = THREE.TOUCH.PAN;
+        }
+    } else if (e.touches.length === 2) {
+        // 2本指タッチの場合 → 「回転、ズーム（ピンチイン・アウト）」
+        isTouchingModel = false;
+        controls.enableRotate = true;
+        controls.enablePan = true;
+        
+        // OrbitControlsの標準挙動（2本指＝回転、ピンチ＝ズーム）に戻す
+        controls.touches.ONE = THREE.TOUCH.ROTATE;
+        controls.touches.TWO = THREE.TOUCH.DOLLY_PAN;
+    }
+}, { passive: false });
+
+
+// --- ② タッチ移動中 (touchmove) ---
+canvas.addEventListener('touchmove', (e) => {
+    if (isMeasureMode || isMemoMode) return;
+
+    if (e.touches.length === 1) {
+        if (isTouchingModel) {
+            // A. モデル上で始まった1本指スワイプ → 「連続色付け」
+            e.stopPropagation();
+            e.preventDefault(); // 画面スクロールやカメラ回転を完全にブロック
+
+            const touch = e.touches[0];
+            const intersect = getTouchIntersect(touch);
+            if (intersect) {
+                handleSinglePaint(intersect); // ドラッグ経路上の面を連続ペイント
+            }
+        } else {
+            // B. 何もない空間で始まった1本指スワイプ → 「パン移動」
+            // OrbitControlsが自動的にパン移動を処理するため、イベントの阻止はせず流す
+        }
+    }
+}, { passive: false });
+
+
+// --- ③ タッチ終了 (touchend) ---
+canvas.addEventListener('touchend', (e) => {
+    // 操作が終わったら、OrbitControlsの挙動をPC・マウス用のデフォルト設定に綺麗にリセット
+    isTouchingModel = false;
+    controls.enableRotate = true;
+    controls.enablePan = true;
+    
+    // OrbitControlsのデフォルトのタッチ割り当てに戻す
+    controls.touches.ONE = THREE.TOUCH.ROTATE;
+    controls.touches.TWO = THREE.TOUCH.DOLLY_PAN;
+});
+
+
+// 💡 タッチ操作からFaceIDを狙い撃ちしてペイントする共通ヘルパー
+function handleSinglePaint(intersect) {
+    const child = intersect.object;
+    const geometry = child.geometry;
+    const colorAttr = geometry?.attributes?.color;
+    const faceIdAttr = geometry?.attributes?.faceId;
+
+    if (colorAttr && faceIdAttr && intersect.face) {
+        // ヒットしたポリゴン頂点からFaceIDを取得
+        const vertexIndex = intersect.face.a;
+        const fId = Math.round(faceIdAttr.getX(vertexIndex));
+        
+        // 現在選択中のパレットカラー(HEX)を取得 (例: #ff0000)
+        // アプリ内で保持している現在の選択色変数に書き換えてください
+        const activeColorHex = colorPicker ? colorPicker.value : "#ff0000"; 
+        const tempColor = new THREE.Color(activeColorHex);
+
+        // 該当するFaceIDを持つすべての頂点の色を塗り替える
+        const vertexCount = colorAttr.count;
+        let updated = false;
+
+        for (let i = 0; i < vertexCount; i++) {
+            if (Math.round(faceIdAttr.getX(i)) === fId) {
+                colorAttr.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
+                updated = true;
+            }
+        }
+
+        if (updated) {
+            colorAttr.needsUpdate = true;
+            
+            // 右下のFaceID情報表示ボックスもリアルタイム更新
+            if (faceIdLabel) faceIdLabel.innerText = fId;
+            if (meshNameLabel) meshNameLabel.innerText = child.name || "Unnamed";
+            
+            // 💡 必要に応じて、既存のアンドゥ用履歴保存（saveHistory）などをここに挟んでください
+        }
+    }
+}
+
+
+// ============================================================
+// 👑 追加：HTMLのランチャー起動ボタンのイベント設定
+// ============================================================
+const btnTriggerLauncher = document.getElementById('btn-trigger-launcher');
+if (btnTriggerLauncher) {
+    btnTriggerLauncher.addEventListener('click', (e) => {
+        e.stopPropagation(); // イベントの誤爆防止
+        toggleLauncher();
+    });
+}
+
+
+// ============================================================
+// ⌨️ キーボードショートカット設定 ([ESC] でのトグル・解除 ＆ ランチャー)
+// ============================================================
+window.addEventListener('keydown', (e) => {
+    // いずれかのメモテキストエリアに入力中の場合は、ESCでフォーカスを外す処理を最優先
+    if (document.activeElement && document.activeElement.classList.contains('pop-memo-textarea')) {
+        if (e.key === 'Escape' || e.code === 'Escape') {
+            document.activeElement.blur();
+        }
+        return;
+    }
+
+    if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
+    
+    // 👑 【ESCキー】の挙動をスマートに制御
+    if (e.key === 'Escape' || e.code === 'Escape') {
+        if (isMeasureMode || isMemoMode) {
+            // ① 特殊モード（測定やメモ）が起動している場合は、従来通り「モードを解除」
+            if (isMeasureMode) toggleMeasureMode(false);
+            if (isMemoMode) toggleMemoMode(false);
+        } else {
+            // ② 何も起動していない通常状態であれば、「ランチャーを起動・閉じる」
+            toggleLauncher();
+        }
+        return;
+    }
+
+    // スペースキーでクイックランチャー（従来通り）
+    if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        toggleLauncher();
+    }
+    
+    // ランチャーが開いているときの数字キーコマンド
+    if (isLauncherOpen) {
+        if (e.key === '1' && btnToolMeasure) btnToolMeasure.click();
+        if (e.key === '2' && btnToolClipping) btnToolClipping.click();
+        if (e.key === '3' && btnToolMemo) btnToolMemo.click();
+    }
+});
+
+// ランチャー開閉関数（ボタンの文字を状態に合わせて変化させる処理を追加）
+function toggleLauncher() {
+    isLauncherOpen = !isLauncherOpen;
+    if (launcherOverlay) launcherOverlay.classList.toggle('active', isLauncherOpen);
+    
+    // ランチャーが開いている時はボタンの色を少し変える演出（任意）
+    if (btnTriggerLauncher) {
+        if (isLauncherOpen) {
+            btnTriggerLauncher.style.background = '#10b981'; // 緑色
+        } else {
+            btnTriggerLauncher.style.background = '#3b82f6'; // 元の青色
+        }
+    }
+}
+
+// ============================================================
+// 🖱️ マウスクリックメイン処理（距離測定 ＆ 3D複数配置メモ）
+// ============================================================
+canvas.addEventListener('mousedown', (e) => {
+    if (!isMeasureMode && !isMemoMode) return;
+    if (e.button !== 0) return; // 左クリックのみ
+
+    e.stopImmediatePropagation();
+    e.preventDefault();
+
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    
+    if (currentModel) {
+        const intersects = raycaster.intersectObjects(currentModel.children, true);
+        const intersect = intersects.find(hit => hit.object.isMesh);
+        if (intersect) {
+            if (isMeasureMode) {
+                handleMeasureClick(intersect);
+            } else if (isMemoMode) {
+                // 💡 複数配置可能なメモ生成処理を呼び出し
+                createNewMemo(intersect.point.clone());
+            }
+        }
+    }
+}, true);
+
+
+// ------------------------------------------------------------
+// ① 距離測定ロジック（変更なし）
+// ------------------------------------------------------------
+if (btnToolMeasure) {
+    btnToolMeasure.addEventListener('click', () => {
+        toggleLauncher();
+        toggleMeasureMode();
+    });
+}
+
+function handleMeasureClick(intersect) {
+    const pt = intersect.point.clone();
+    measurePoints.push(pt);
+
+    const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(1.2, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xff3333, depthTest: false })
+    );
+    marker.position.copy(pt);
+    scene.add(marker);
+    measureMarkers.push(marker);
+
+    if (measurePoints.length === 1) {
+        if (measureText) measureText.innerText = '1点目選択済み。2点目を指定してください...';
+        if (measureXyzText) measureXyzText.style.display = 'none';
+    } else if (measurePoints.length === 2) {
+        const p1 = measurePoints[0];
+        const p2 = measurePoints[1];
+
+        const distance = p1.distanceTo(p2);
+        const dx = Math.abs(p1.x - p2.x);
+        const dy = Math.abs(p1.y - p2.y);
+        const dz = Math.abs(p1.z - p2.z);
+
+        if (measureText) {
+            measureText.innerHTML = `直線距離: <span style="font-size:15px; color:#5af5a2; font-weight:bold;">${distance.toFixed(3)}</span> mm`;
+        }
+        if (measureXyzText) {
+            measureXyzText.innerHTML = `ΔX (幅): ${dx.toFixed(3)} mm<br>ΔY (高さ): ${dy.toFixed(3)} mm<br>ΔZ (奥行): ${dz.toFixed(3)} mm`;
+            measureXyzText.style.display = 'block';
+        }
+
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(measurePoints);
+        measureVisualLine = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xff3333, linewidth: 2, depthTest: false }));
+        scene.add(measureVisualLine);
+    } else {
+        clearMeasure();
+        measurePoints.push(pt);
+        scene.add(marker);
+        measureMarkers.push(marker);
+        if (measureText) measureText.innerText = '1点目選択済み。2点目を指定してください...';
+    }
+}
+
+function clearMeasure() {
+    measurePoints = [];
+    if (measureVisualLine) { scene.remove(measureVisualLine); measureVisualLine.geometry.dispose(); measureVisualLine = null; }
+    measureMarkers.forEach(m => { scene.remove(m); m.geometry.dispose(); });
+    measureMarkers = [];
+    if (measureText) measureText.innerText = '距離: ---';
+    if (measureXyzText) measureXyzText.style.display = 'none';
+}
+
+
+// ------------------------------------------------------------
+// 👑 ② 複数配置 ＆ 永続表示対応型 3D追従メモ帳ロジック
+// ------------------------------------------------------------
+if (btnToolMemo) {
+    btnToolMemo.addEventListener('click', () => {
+        toggleLauncher();
+        toggleMemoMode();
+    });
+}
+
+// 💡 新しいメモオブジェクトとHTML要素を完全に動的生成する
+function createNewMemo(point) {
+    const memoId = 'memo_' + Date.now();
+
+    // 1. 3D空間上のピン（黄色の球体）を生成して配置
+    const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(1.0, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xf1c40f, depthTest: true })
+    );
+    marker.position.copy(point);
+    scene.add(marker);
+
+    // 2. HTMLのミニウィンドウ要素を動的に構築
+    const memoEl = document.createElement('div');
+    memoEl.id = memoId;
+    memoEl.style.cssText = `
+        position: absolute; 
+        background: rgba(20, 20, 30, 0.95); 
+        border: 1px solid #f1c40f; 
+        border-radius: 8px; 
+        padding: 8px; 
+        width: 220px; 
+        z-index: 500; 
+        box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+        display: block;
+    `;
+
+    // ウィンドウヘッダー（タイトルと削除ボタン）
+    const header = document.createElement('div');
+    header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; border-bottom: 1px solid #444; padding-bottom: 2px;';
+    
+    const title = document.createElement('span');
+    title.innerText = `📝 メモ #${memoList.length + 1}`;
+    title.style.cssText = 'color: #f1c40f; font-size: 11px; font-weight: bold; pointer-events: none;';
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.innerText = '×';
+    closeBtn.style.cssText = 'background: transparent; color: #888; border: none; cursor: pointer; font-size: 14px; padding: 0 4px; outline: none;';
+    
+    // 削除ボタンクリック時の処理
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeMemo(memoId);
+    });
+
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    // テキスト入力エリア
+    const textarea = document.createElement('textarea');
+    textarea.className = 'pop-memo-textarea';
+    textarea.style.cssText = 'width: 100%; height: 70px; background: #111; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 4px; resize: none; font-size: 12px; outline: none;';
+    textarea.placeholder = "メモを入力... [ESCで確定]";
+
+    // 入力時に即座にデータ（メモリ内）に反映するイベント
+    textarea.addEventListener('input', () => {
+        const targetMemo = memoList.find(m => m.id === memoId);
+        if (targetMemo) targetMemo.text = textarea.value;
+    });
+
+    memoEl.appendChild(header);
+    memoEl.appendChild(textarea);
+
+    // ドキュメントに追加
+    document.body.appendChild(memoEl);
+
+    // 3. データ配列に保存
+    const newMemoObj = {
+        id: memoId,
+        point: point,
+        text: '',
+        marker: marker,
+        element: memoEl
+    };
+    memoList.push(newMemoObj);
+
+    // 位置を即時計算してフォーカス
+    updateSingleMemoPosition(newMemoObj);
+    textarea.focus();
+}
+
+// 💡 JSONインポート時にデータから直接メモオブジェクトを安全に復元する関数
+function restoreMemoFromData(point, text) {
+    const memoId = 'memo_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+
+    // 1. 3D空間上のピン（黄色の球体）を生成
+    const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(1.0, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xf1c40f, depthTest: true })
+    );
+    marker.position.copy(point);
+    scene.add(marker);
+
+    // 2. HTMLのミニウィンドウ要素を生成
+    const memoEl = document.createElement('div');
+    memoEl.id = memoId;
+    memoEl.style.cssText = `
+        position: absolute; 
+        background: rgba(20, 20, 30, 0.95); 
+        border: 1px solid #f1c40f; 
+        border-radius: 8px; 
+        padding: 8px; 
+        width: 220px; 
+        z-index: 500; 
+        box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+        display: none; /* デフォルトは一旦非表示、モードの状態に依存させる */
+    `;
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; border-bottom: 1px solid #444; padding-bottom: 2px;';
+    
+    const title = document.createElement('span');
+    title.innerText = `📝 メモ #${memoList.length + 1}`;
+    title.style.cssText = 'color: #f1c40f; font-size: 11px; font-weight: bold; pointer-events: none;';
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.innerText = '×';
+    closeBtn.style.cssText = 'background: transparent; color: #888; border: none; cursor: pointer; font-size: 14px; padding: 0 4px; outline: none;';
+    
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeMemo(memoId);
+    });
+
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'pop-memo-textarea';
+    textarea.style.cssText = 'width: 100%; height: 70px; background: #111; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 4px; resize: none; font-size: 12px; outline: none;';
+    textarea.placeholder = "メモを入力... [ESCで確定]";
+    textarea.value = text; // 💡 復元されたテキストを注入
+
+    textarea.addEventListener('input', () => {
+        const targetMemo = memoList.find(m => m.id === memoId);
+        if (targetMemo) targetMemo.text = textarea.value;
+    });
+
+    memoEl.appendChild(header);
+    memoEl.appendChild(textarea);
+    document.body.appendChild(memoEl);
+
+    // 3. リストにプッシュ
+    const restoredMemoObj = {
+        id: memoId,
+        point: point,
+        text: text,
+        marker: marker,
+        element: memoEl
+    };
+    memoList.push(restoredMemoObj);
+}
+
+
+// 特定のメモを完全削除する
+function removeMemo(memoId) {
+    const index = memoList.findIndex(m => m.id === memoId);
+    if (index === -1) return;
+
+    const memo = memoList[index];
+
+    // 3Dピンの削除
+    if (memo.marker) {
+        scene.remove(memo.marker);
+        if (memo.marker.geometry) memo.marker.geometry.dispose();
+        if (memo.marker.material) memo.marker.material.dispose();
+    }
+    // HTML要素の削除
+    if (memo.element && memo.element.parentNode) {
+        memo.element.parentNode.removeChild(memo.element);
+    }
+
+    memoList.splice(index, 1);
+
+    // ラベルの番号（#1, #2...）を綺麗に振り直す
+    memoList.forEach((m, idx) => {
+        const titleSpan = m.element.querySelector('span');
+        if (titleSpan) titleSpan.innerText = `📝 メモ #${idx + 1}`;
+    });
+}
+
+// 単一のメモウィンドウの位置を3D空間の座標から2D画面へマッピングする
+function updateSingleMemoPosition(memo) {
+    if (!memo.point || !memo.element || memo.element.style.display === 'none') return;
+
+    const wp = memo.point.clone();
+    wp.project(camera); 
+
+    const rect = canvas.getBoundingClientRect();
+    const x = (wp.x * .5 + .5) * rect.width + rect.left;
+    const y = (-(wp.y * .5) + .5) * rect.height + rect.top;
+
+    // クリックした3D点から少し右上へオフセットして表示
+    memo.element.style.left = `${x + 12}px`;
+    memo.element.style.top = `${y - 40}px`;
+}
+
+// 新しく別のSTEPファイルが読み込まれた時にすべてのメモを安全に一掃するクリーンアップ
+function clearAllMemos() {
+    const ids = memoList.map(m => m.id);
+    ids.forEach(id => removeMemo(id));
+    memoList = [];
+}
+
+
+// ------------------------------------------------------------
+// ③ 高機能断面表示ロジック（変更なし）
+// ------------------------------------------------------------
+if (btnToolClipping) {
+    btnToolClipping.addEventListener('click', () => {
+        if (!currentModel) {
+            alert('モデルが読み込まれていません。');
+            toggleLauncher();
+            return;
+        }
+        toggleLauncher();
+        isClippingMode = !isClippingMode;
+
+        if (isClippingMode) {
+            if (btnToolClipping) btnToolClipping.style.background = '#b45309';
+            if (mainClippingPanel) mainClippingPanel.style.display = 'block';
+
+            const box = new THREE.Box3().setFromObject(currentModel);
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+
+            if (clipSliderDist) {
+                clipSliderDist.min = -maxDim * 1.5;
+                clipSliderDist.max = maxDim * 1.5;
+                clipSliderDist.step = (maxDim / 200).toFixed(2);
+                clipSliderDist.value = 0;
+            }
+            if (clipSliderAngle) clipSliderAngle.value = 0;
+            
+            applyClippingTransform();
+            updateModelClipping(true);
+        } else {
+            if (btnToolClipping) btnToolClipping.style.background = '';
+            if (mainClippingPanel) mainClippingPanel.style.display = 'none';
+            updateModelClipping(false);
+        }
+    });
+}
+
+const axisButtons = [clipAxisX, clipAxisY, clipAxisZ];
+axisButtons.forEach(btn => {
+    if (btn) {
+        btn.addEventListener('click', (e) => {
+            axisButtons.forEach(b => { if (b) b.classList.remove('active-axis'); });
+            e.target.classList.add('active-axis');
+            currentClipAxis = e.target.innerText.replace('軸', '');
+            applyClippingTransform();
+        });
+    }
+});
+
+if (clipSliderDist)  clipSliderDist.addEventListener('input', applyClippingTransform);
+if (clipSliderAngle) clipSliderAngle.addEventListener('input', applyClippingTransform);
+
+function applyClippingTransform() {
+    if (!currentModel) return;
+
+    const offsetDist = clipSliderDist ? parseFloat(clipSliderDist.value) : 0;
+    const angleDeg = clipSliderAngle ? parseFloat(clipSliderAngle.value) : 0;
+    const angleRad = (angleDeg * Math.PI) / 180;
+
+    let normal = new THREE.Vector3();
+    if (currentClipAxis === 'X') {
+        normal.set(-Math.cos(angleRad), 0, -Math.sin(angleRad));
+    } else if (currentClipAxis === 'Y') {
+        normal.set(0, -Math.cos(angleRad), -Math.sin(angleRad));
+    } else {
+        normal.set(-Math.sin(angleRad), -Math.cos(angleRad), 0);
+    }
+    normal.normalize();
+
+    const box = new THREE.Box3().setFromObject(currentModel);
+    const center = box.getCenter(new THREE.Vector3());
+
+    localPlane.normal.copy(normal);
+    localPlane.constant = center.dot(normal) + offsetDist;
+
+    if (clipDistVal)  clipDistVal.innerText = `${offsetDist >= 0 ? '+' : ''}${offsetDist.toFixed(1)} mm`;
+    if (clipAngleVal) clipAngleVal.innerText = `${angleDeg}°`;
+}
+
+function updateModelClipping(enable) {
+    if (!currentModel) return;
+    currentModel.traverse((child) => {
+        if (child.isMesh) {
+            child.material.clippingPlanes = enable ? [localPlane] : [];
+            child.material.clipShadows = enable;
+            child.material.needsUpdate = true;
+        }
+    });
+}
 
 
 ////////////////////////////////////////////////////////////
-// Animate
+// Animate (👑 毎フレームのループ処理で「すべての表示中メモ」を3D追従)
 ////////////////////////////////////////////////////////////
 
 (function animate() {
     requestAnimationFrame(animate);
     controls.update();
+    
+    // 💡 メモモードがONの時は、配置されているすべてのミニウィンドウをカメラの動きに合わせて追従させる
+    if (isMemoMode) {
+        memoList.forEach(memo => updateSingleMemoPosition(memo));
+    }
+
     renderer.render(scene, camera);
 })();
