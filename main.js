@@ -280,6 +280,7 @@ let hoveredFaceId   = null;   // 現在ホバーしているFaceID
 let highlightGroup  = null;   // ハイライト表示用のコンテナ
 colorPicker.value = '#e74c3c';
 let isPaintingSession = false;
+let paintChangedThisSession = false;
 
 ////////////////////////////////////////////////////////////
 // opencascade.js 初期化
@@ -699,6 +700,12 @@ function checkAndPaint(clientX, clientY) {
 
     //if (isFirstClick) saveHistory();
 
+    // 最初の実変更時だけ履歴保存
+    if (!paintChangedThisSession) {
+        saveHistory();
+        paintChangedThisSession = true;
+    }
+    
     if (paintMode === 'part') {
         applyColorToPart(targetMesh, colorPicker.value);
     } else {
@@ -871,10 +878,9 @@ canvas.addEventListener('pointerdown', (e) => {
         isRotating      = false;
     
         // ペイント開始時に1回だけ履歴保存
-        if (!isPaintingSession) {
-            saveHistory();
-            isPaintingSession = true;
-        }
+        isPaintingSession = true;
+        paintChangedThisSession = false;
+
     
         checkAndPaint(e.clientX, e.clientY);
     } else {
@@ -906,6 +912,7 @@ const stopPainting = () => {
 
     // セッション終了
     isPaintingSession = false;
+    paintChangedThisSession = false;
 
     clearHighlight();
 };
