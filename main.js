@@ -279,7 +279,7 @@ let showGrid        = true;
 let hoveredFaceId   = null;   // 現在ホバーしているFaceID
 let highlightGroup  = null;   // ハイライト表示用のコンテナ
 colorPicker.value = '#e74c3c';
-
+let isPaintingSession = false;
 
 ////////////////////////////////////////////////////////////
 // opencascade.js 初期化
@@ -660,7 +660,7 @@ async function loadStepFile(file) {
 // Paint Core
 ////////////////////////////////////////////////////////////
 
-function checkAndPaint(clientX, clientY, isFirstClick = false) {
+function checkAndPaint(clientX, clientY) {
     if (!currentModel || !faceGroupMap) return;
 
     const rect = canvas.getBoundingClientRect();
@@ -697,7 +697,7 @@ function checkAndPaint(clientX, clientY, isFirstClick = false) {
     const paintModeElement = document.querySelector('input[name="paintMode"]:checked');
     const paintMode = paintModeElement ? paintModeElement.value : 'face';
 
-    if (isFirstClick) saveHistory();
+    //if (isFirstClick) saveHistory();
 
     if (paintMode === 'part') {
         applyColorToPart(targetMesh, colorPicker.value);
@@ -866,9 +866,17 @@ function clearHighlight() {
 
 canvas.addEventListener('pointerdown', (e) => {
     if (e.button === 0 && !e.shiftKey && !e.ctrlKey) {
+
         isLeftMouseDown = true;
         isRotating      = false;
-        checkAndPaint(e.clientX, e.clientY, true);
+    
+        // ペイント開始時に1回だけ履歴保存
+        if (!isPaintingSession) {
+            saveHistory();
+            isPaintingSession = true;
+        }
+    
+        checkAndPaint(e.clientX, e.clientY);
     } else {
         isRotating = true;
     }
@@ -877,7 +885,7 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
     if (isLeftMouseDown && !isRotating) {
         controls.enabled = false;
-        checkAndPaint(e.clientX, e.clientY, false);
+        checkAndPaint(e.clientX, e.clientY);
         clearHighlight();
         return;
     }
@@ -895,7 +903,11 @@ const stopPainting = () => {
     isLeftMouseDown  = false;
     isRotating       = false;
     controls.enabled = true;
-    clearHighlight(); 
+
+    // セッション終了
+    isPaintingSession = false;
+
+    clearHighlight();
 };
 window.addEventListener('pointerup', stopPainting);
 canvas.addEventListener('pointerleave', stopPainting);
