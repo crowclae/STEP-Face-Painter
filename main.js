@@ -697,7 +697,7 @@ function checkAndPaint(clientX, clientY, isFirstClick = false) {
     const paintModeElement = document.querySelector('input[name="paintMode"]:checked');
     const paintMode = paintModeElement ? paintModeElement.value : 'face';
 
-    if (isFirstClick) saveHistory(targetMesh);
+    if (isFirstClick) saveHistory();
 
     if (paintMode === 'part') {
         applyColorToPart(targetMesh, colorPicker.value);
@@ -920,24 +920,56 @@ document.querySelectorAll('.palette-btn').forEach((btn) => {
 // Undo
 ////////////////////////////////////////////////////////////
 
-function saveHistory(mesh) {
-    const attr = mesh?.geometry?.attributes?.color;
-    if (!attr || !attr.array) return;
-    colorHistory.push(attr.array.slice());
-    if (colorHistory.length > MAX_HISTORY) colorHistory.shift();
+function saveHistory() {
+    if (!currentModel) return;
+
+    const snapshot = [];
+
+    currentModel.traverse((child) => {
+        if (child.isMesh) {
+            const attr = child.geometry?.attributes?.color;
+
+            if (attr && attr.array) {
+                snapshot.push({
+                    meshUUID: child.uuid,
+                    colors: attr.array.slice()
+                });
+            }
+        }
+    });
+
+    colorHistory.push(snapshot);
+
+    if (colorHistory.length > MAX_HISTORY) {
+        colorHistory.shift();
+    }
 }
 
 undoButton.addEventListener('click', () => {
     if (!colorHistory.length || !currentModel) return;
-    
-    currentModel.traverse((child) => {
-        if (child.isMesh && colorHistory.length > 0) {
-            const attr = child.geometry.attributes.color;
-            if (attr) {
-                attr.array.set(colorHistory.pop());
-                attr.needsUpdate = true;
-            }
+
+    const snapshot = colorHistory.pop();
+
+    snapshot.forEach((entry) => {
+        const mesh = currentModel.getObjectByProperty('uuid', entry.meshUUID);
+
+        if (!mesh || !mesh.isMesh) return;
+
+        const attr = mesh.geometry?.attributes?.color;
+
+        if (!attr) return;
+
+        // サイズ不一致防止
+        if (attr.array.length !== entry.colors.length) {
+            console.warn(
+                'Undo skipped due to size mismatch:',
+                mesh.name
+            );
+            return;
         }
+
+        attr.array.set(entry.colors);
+        attr.needsUpdate = true;
     });
 });
 
