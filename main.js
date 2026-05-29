@@ -336,7 +336,7 @@ viewerContainer.addEventListener('drop', async (e) => {
 
 
 ////////////////////////////////////////////////////////////
-// 進捗表示の更新ユーティリティ
+// 進捗表示の更新ユーティリティ（修正版）
 ////////////////////////////////////////////////////////////
 async function updateProgress(text, percent = null) {
     const loadingText = document.getElementById('loading-text');
@@ -346,23 +346,23 @@ async function updateProgress(text, percent = null) {
     if (loadingText) loadingText.innerText = text;
     
     if (percent !== null && barContainer && barFill) {
-        barContainer.style.display = 'block';
+        barContainer.style.display = 'block'; // 確実に表示
         barFill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
-    } else if (barContainer) {
-        barContainer.style.display = 'none';
     }
     
-    // JSのメインスレッドを一時的に解放し、ブラウザの描画（DOM更新）を強制する
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // 待機時間を少しだけ伸ばし（20ms）、ブラウザに確実に描画（リフロー・リペイント）させる
+    await new Promise(resolve => setTimeout(resolve, 20));
 }
 
 ////////////////////////////////////////////////////////////
-// STEP Loader (進捗表示・プログレスバー対応版)
+// STEP Loader (修正版)
 ////////////////////////////////////////////////////////////
-
 async function loadStepFile(file) {
     try {
         loading.style.display = 'block';
+        // 最初にプログレスバーのコンテナを明示的に出す
+        document.getElementById('progress-bar-container').style.display = 'block';
+        
         await updateProgress('ファイルの読み込み中...', 5);
 
         if (currentModel) {
@@ -394,13 +394,13 @@ async function loadStepFile(file) {
             throw new Error('STEP read failed. Status: ' + readResult);
         }
 
-        // OpenCascade内部のトランスファー処理
         reader.TransferRoots(new oc.Message_ProgressRange_1());
         const shape = reader.OneShape();
 
+        // 【最難関】ここでWASMがフリーズするため、直前に少し長めの猶予をブラウザに与える
         await updateProgress('ポリゴンメッシュを生成中 (Tessellation)...', 40);
+        await new Promise(resolve => setTimeout(resolve, 50)); 
         
-        // 形状の複雑さに応じて時間がかかるメッシュ化処理
         new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false);
 
         await updateProgress('パーツ構造を解析中...', 60);
@@ -413,10 +413,6 @@ async function loadStepFile(file) {
             linewidth: 1     
         });
 
-        let globalFaceId = 0;
-        let totalTriangles = 0;
-
-        // SOLIDの総数を事前にカウント（進捗計算用）
         const countExplorer = new oc.TopExp_Explorer_1();
         countExplorer.Init(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
         let totalSolids = 0;
@@ -425,16 +421,22 @@ async function loadStepFile(file) {
             countExplorer.Next();
         }
 
-        // SOLID（塊）単位で探索してパーツを個別に構築
         const solidExplorer = new oc.TopExp_Explorer_1();
         solidExplorer.Init(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
 
         let solidId = 0;
+        let globalFaceId = 0;
+        let totalTriangles = 0;
+        let lastPercent = 60; // 前回のパーセンテージを記録
 
         while (solidExplorer.More()) {
-            // パーツごとの進捗率を計算 (60% 〜 95% の間をソリッド数で分割)
             const currentPercent = 60 + Math.floor((solidId / (totalSolids || 1)) * 35);
-            await updateProgress(`パーツ構築中 (${solidId + 1} / ${totalSolids})...`, currentPercent);
+            
+            // ★変更点: パーセンテージが上がったときだけ UI 更新（負荷軽減・カクつき防止）
+            if (currentPercent > lastPercent || solidId === 0 || solidId === totalSolids - 1) {
+                await updateProgress(`パーツ構築中 (${solidId + 1} / ${totalSolids})...`, currentPercent);
+                lastPercent = currentPercent;
+            }
 
             const solid = oc.TopoDS.Solid_1(solidExplorer.Current());
 
@@ -636,7 +638,7 @@ async function loadStepFile(file) {
             });
         }
 
-        scene.add(currentModel);
+scene.add(currentModel);
         triCountLabel.innerText = totalTriangles.toLocaleString();
 
         triggerAutoFit();
@@ -644,9 +646,7 @@ async function loadStepFile(file) {
         await updateProgress('インポート完了！', 100);
         setTimeout(() => {
             loading.style.display = 'none';
-        }, 300);
-
-        console.log(`STEP loaded by Solid: ${solidId} genuine parts found, ${globalFaceId} total faces.`);
+        }, 500);
 
     } catch (err) {
         console.error(err);
