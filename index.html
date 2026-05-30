@@ -654,8 +654,12 @@
 </div>
 
 <div id="main-clipping-panel" style="position: absolute; bottom: 60px; left: 20px; background: rgba(20, 20, 28, 0.95); border: 1px solid #7dd3fc; padding: 14px; border-radius: 8px; font-size: 12px; color: #fff; display: none; z-index: 100; width: 280px; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
-    <div style="font-weight: bold; color: #7dd3fc; margin-bottom: 10px; border-bottom: 1px solid #334; padding-bottom: 4px;">✂️ 断面カットコントローラー</div>
     
+    <div style="font-weight: bold; color: #7dd3fc; margin-bottom: 10px; border-bottom: 1px solid #334; padding-bottom: 4px;">✂️ 断面カットコントローラー</div>
+        <div class="ctrl-row" style="margin-top: 8px;">
+            <button id="clip-reset-btn" class="action-btn" style="background: #1e3a8a; border-color: #3b82f6;">位置・傾きをリセット</button>
+        </div>
+
     <div style="margin-bottom: 10px;">
         <label style="color:#aaa; display:block; margin-bottom:4px;">切断軸 (法線):</label>
         <div style="display: flex; gap: 6px;">
@@ -664,6 +668,8 @@
             <button class="action-btn clip-axis-btn" id="clip-axis-z" style="flex:1; padding:4px;">Z軸</button>
         </div>
     </div>
+
+    
 
     <div style="margin-bottom: 10px;">
         <div style="display:flex; justify-content:between; margin-bottom:2px;">
@@ -680,6 +686,32 @@
         </div>
         <input type="range" id="clip-slider-angle" min="-180" max="180" step="1" value="0" style="width:100%; cursor:pointer;">
     </div>
+</div>
+
+<div id="memo-export-panel" style="position: absolute; bottom: 60px; left: 20px; background: rgba(20, 20, 28, 0.95); border: 1px solid #f1c40f; padding: 12px; border-radius: 8px; font-size: 12px; color: #fff; display: none; z-index: 100; width: 240px; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+    <div style="font-weight: bold; color: #f1c40f; margin-bottom: 8px; border-bottom: 1px solid #444; padding-bottom: 4px;">📝 メモ管理メニュー</div>
+    <div style="margin-bottom: 8px; color: #aaa; font-size: 11px;">
+        配置されたすべての3D位置メモと全体のメモをCSVで一括出力します。
+    </div>
+    <button class="action-btn" id="btn-export-memo-csv" style="background: #b45309; border-color: #d97706; color: white; font-weight: bold;">
+        📊 CSV一括エクスポート
+    </button>
+</div>
+
+<div id="selection-mode-panel" style="position: absolute; bottom: 20px; left: 20px; background: rgba(20, 20, 28, 0.94); border: 1px solid #445; padding: 12px 16px; border-radius: 8px; display: none; z-index: 1000; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); min-width: 170px;">
+    <div style="font-size: 11px; color: #7dd3fc; font-weight: bold; letter-spacing: 0.05em; border-bottom: 1px solid #334; padding-bottom: 4px; margin-bottom: 4px;">選択モード</div>
+    <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #e0e0e0;">
+        <input type="radio" name="selectMode" value="vertex" checked style="cursor: pointer;"> 📍 点 (頂点スナップ)
+    </label>
+    <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #e0e0e0;">
+        <input type="radio" name="selectMode" value="edge" style="cursor: pointer;"> 🔲 線 (エッジライン)
+    </label>
+    <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #e0e0e0;">
+        <input type="radio" name="selectMode" value="face-point" style="cursor: pointer;"> 🎯 面上の点 (任意点)
+    </label>
+    <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #e0e0e0;">
+        <input type="radio" name="selectMode" value="part" style="cursor: pointer;"> 📦 パーツ (ソリッド)
+    </label>
 </div>
 
 <style>

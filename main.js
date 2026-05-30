@@ -11,6 +11,7 @@
 //  - 折りたたみ式のパーツ表示切替UI（一括操作対応）
 //  - [追加] 距離測定（最短＋XYZ軸距離）＆測定時のペイント一時停止ガード
 //  - [追加] 3軸・角度・距離対応の高機能メイン画面連携断面切断表示
+//5月30日メモ機能時の色付け停止
 ////////////////////////////////////////////////////////////
 
 
@@ -83,6 +84,7 @@ const clipSliderDist       = document.getElementById('clip-slider-dist');
 const clipSliderAngle      = document.getElementById('clip-slider-angle');
 const clipDistVal          = document.getElementById('clip-dist-val');
 const clipAngleVal         = document.getElementById('clip-angle-val');
+const clipResetBtn         = document.getElementById('clip-reset-btn');
 
 
 ////////////////////////////////////////////////////////////
@@ -292,6 +294,8 @@ scene.add(dirLight);
 
 const raycaster = new THREE.Raycaster();
 const mouse     = new THREE.Vector2();
+raycaster.params.Line = { threshold: 0.5 }; // モデルスケールに合わせて調整
+
 
 
 ////////////////////////////////////////////////////////////
@@ -323,6 +327,21 @@ let measureMarkers = [];
 
 let currentClipAxis = 'X';
 const localPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
+
+// 既存の measure 関連ステートの近くに追加
+const selectionModePanel = document.getElementById('selection-mode-panel');
+
+// 測定モード切り替え時にUIを連動させる処理 (既存の btnToolMeasure イベントやモード切り替え箇所を修正)
+// 例: モード切り替え関数内、またはトグル処理内に以下を組み込みます
+let toggleMeasureMode = function (active) {
+    isMeasureMode = active;
+    if (selectionModePanel) {
+        selectionModePanel.style.display = isMeasureMode ? 'flex' : 'none';
+    }
+    if (!isMeasureMode) {
+        clearMeasure();
+    }
+}
 
 
 ////////////////////////////////////////////////////////////
@@ -930,7 +949,8 @@ function clearHighlight() {
 
 canvas.addEventListener('pointerdown', (e) => {
     // 距離測定モード有効時は、ペイント判定用のpointerdown発火をスキップ
-    if (isMeasureMode) return;
+    if (isMeasureMode || isMemoMode) return;
+    //if (!isMeasureMode && !isMemoMode) return;
 
     if (e.button === 0 && !e.shiftKey && !e.ctrlKey) {
 
@@ -948,7 +968,7 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
-    if (isMeasureMode) return;
+    if (isMeasureMode || isMemoMode) return;
 
     if (isLeftMouseDown && !isRotating) {
         controls.enabled = false;
@@ -967,7 +987,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 const stopPainting = () => {
-    if (isMeasureMode) return;
+    if (isMeasureMode || isMemoMode) return;
     isLeftMouseDown  = false;
     isRotating       = false;
     controls.enabled = true;
@@ -1505,16 +1525,18 @@ function updateToolStatusUI() {
 }
 
 // 距離測定モードの切り替え（メモとは排他）
-function toggleMeasureMode(forceState = null) {
+toggleMeasureMode = function (forceState = null) {
     isMeasureMode = forceState !== null ? forceState : !isMeasureMode;
     if (isMeasureMode) {
-        toggleMemoMode(false); // メモモードは強制終了
+        toggleMemoMode(false);
         if (measureLabel) measureLabel.style.display = 'block';
         if (btnToolMeasure) btnToolMeasure.style.background = '#b45309';
+        if (selectionModePanel) selectionModePanel.style.display = 'flex'; // ← 追加
         clearMeasure();
     } else {
         if (measureLabel) measureLabel.style.display = 'none';
         if (btnToolMeasure) btnToolMeasure.style.background = '';
+        if (selectionModePanel) selectionModePanel.style.display = 'none'; // ← 追加
         clearMeasure();
     }
     updateToolStatusUI();
@@ -1523,15 +1545,20 @@ function toggleMeasureMode(forceState = null) {
 // メモモードの切り替え（距離測定とは排他）
 function toggleMemoMode(forceState = null) {
     isMemoMode = forceState !== null ? forceState : !isMemoMode;
+    const memoExportPanel = document.getElementById('memo-export-panel');
     if (isMemoMode) {
         toggleMeasureMode(false); // 距離測定モードは強制終了
         if (btnToolMemo) btnToolMemo.style.background = '#b45309';
         // 💡 再びONになったとき、既存のすべてのメモUI（ミニウィンドウ）を再表示
         showAllMemoElements();
+        // メモ管理メニューパネルを左下に表示
+        if (memoExportPanel) memoExportPanel.style.display = 'block';
     } else {
         if (btnToolMemo) btnToolMemo.style.background = '';
         // 💡 モードOFFの時は、画面が煩雑にならないようメモUI（ミニウィンドウ）を一旦すべて非表示
         hideAllMemoElements();
+        // メモ管理メニューパネルを非表示
+        if (memoExportPanel) memoExportPanel.style.display = 'none';
     }
     updateToolStatusUI();
 }
@@ -1803,8 +1830,21 @@ canvas.addEventListener('mousedown', (e) => {
     raycaster.setFromCamera(mouse, camera);
     
     if (currentModel) {
+        // 1829〜1830行目を修正
         const intersects = raycaster.intersectObjects(currentModel.children, true);
-        const intersect = intersects.find(hit => hit.object.isMesh);
+
+        // edgeモード時はLineSegmentsを優先、それ以外はMeshのみ
+        const activeModeEl = document.querySelector('input[name="selectMode"]:checked');
+        const selectMode = activeModeEl ? activeModeEl.value : 'vertex';
+
+        let intersect;
+        if (selectMode === 'edge') {
+            // LineSegmentsを最優先、なければMeshにフォールバック
+            intersect = intersects.find(hit => hit.object.isLineSegments && hit.object.name === 'edgeLines')
+                    ?? intersects.find(hit => hit.object.isMesh);
+        } else {
+            intersect = intersects.find(hit => hit.object.isMesh);
+        }
         if (intersect) {
             if (isMeasureMode) {
                 handleMeasureClick(intersect);
@@ -1827,57 +1867,252 @@ if (btnToolMeasure) {
     });
 }
 
+////////////////////////////////////////////////////////////
+// 🚀 強化版：測定モード時のクリック選択・幾何特性計算処理
+////////////////////////////////////////////////////////////
+// 1857行目
 function handleMeasureClick(intersect) {
-    const pt = intersect.point.clone();
-    measurePoints.push(pt);
+    if (!intersect || (!intersect.object.isMesh && !intersect.object.isLineSegments)) return;
+    
+    // 現在選択されている選択モードを取得
+    const activeModeEl = document.querySelector('input[name="selectMode"]:checked');
+    const selectMode = activeModeEl ? activeModeEl.value : 'vertex';
+    
+    const mesh = intersect.object;
+    const geometry = mesh.geometry;
+    const positionAttr = geometry.attributes.position;
+    
+    if (!positionAttr) return;
 
-    const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(1.2, 16, 16),
-        new THREE.MeshBasicMaterial({ color: 0xff3333, depthTest: false })
-    );
-    marker.position.copy(pt);
-    scene.add(marker);
-    measureMarkers.push(marker);
-
-    if (measurePoints.length === 1) {
-        if (measureText) measureText.innerText = '1点目選択済み。2点目を指定してください...';
-        if (measureXyzText) measureXyzText.style.display = 'none';
-    } else if (measurePoints.length === 2) {
-        const p1 = measurePoints[0];
-        const p2 = measurePoints[1];
-
-        const distance = p1.distanceTo(p2);
-        const dx = Math.abs(p1.x - p2.x);
-        const dy = Math.abs(p1.y - p2.y);
-        const dz = Math.abs(p1.z - p2.z);
-
-        if (measureText) {
-            measureText.innerHTML = `直線距離: <span style="font-size:15px; color:#5af5a2; font-weight:bold;">${distance.toFixed(3)}</span> mm`;
+    // --- ① 【点：頂点スナップ】モード ---
+    if (selectMode === 'vertex') {
+        const face = intersect.face;
+        if (!face) return;
+        
+        // クリックされた面(Face)の3つの頂点から、最もクリック位置に近い頂点を探索
+        const indices = [face.a, face.b, face.c];
+        let minDst = Infinity;
+        let closestVertex = new THREE.Vector3();
+        
+        for (let i = 0; i < 3; i++) {
+            const v = new THREE.Vector3().fromBufferAttribute(positionAttr, indices[i]);
+            v.applyMatrix4(mesh.matrixWorld); // ワールド座標系に変換
+            const dst = intersect.point.distanceTo(v);
+            if (dst < minDst) {
+                minDst = dst;
+                closestVertex.copy(v);
+            }
         }
-        if (measureXyzText) {
-            measureXyzText.innerHTML = `ΔX (幅): ${dx.toFixed(3)} mm<br>ΔY (高さ): ${dy.toFixed(3)} mm<br>ΔZ (奥行): ${dz.toFixed(3)} mm`;
-            measureXyzText.style.display = 'block';
+        
+        // 2点間測定配列へプッシュ
+        pushMeasurePoint(closestVertex);
+    } 
+    
+// --- ② 【線：エッジライン】モード ---
+    else if (selectMode === 'edge') {
+
+        let p1, p2;
+
+        // ── LineSegments（edgeLines）に直接ヒットした場合 ──
+        if (intersect.object.isLineSegments) {
+            const lineGeo = intersect.object.geometry;
+            const posAttr = lineGeo.attributes.position;
+            const lineIdx = intersect.faceIndex; // 1プリミティブ = 2頂点
+            const i0 = lineIdx * 2;
+            const i1 = lineIdx * 2 + 1;
+            p1 = new THREE.Vector3().fromBufferAttribute(posAttr, i0)
+                     .applyMatrix4(intersect.object.matrixWorld);
+            p2 = new THREE.Vector3().fromBufferAttribute(posAttr, i1)
+                     .applyMatrix4(intersect.object.matrixWorld);
+
+        // ── フォールバック：メッシュ面の三角形辺から最近傍エッジを選ぶ ──
+        } else {
+            const face = intersect.face;
+            if (!face) return;
+
+            const vA = new THREE.Vector3().fromBufferAttribute(positionAttr, face.a).applyMatrix4(mesh.matrixWorld);
+            const vB = new THREE.Vector3().fromBufferAttribute(positionAttr, face.b).applyMatrix4(mesh.matrixWorld);
+            const vC = new THREE.Vector3().fromBufferAttribute(positionAttr, face.c).applyMatrix4(mesh.matrixWorld);
+
+            const edges = [
+                { p1: vA, p2: vB },
+                { p1: vB, p2: vC },
+                { p1: vC, p2: vA }
+            ];
+
+            let minEdgeDist = Infinity;
+            let targetEdge = edges[0];
+
+            edges.forEach(edge => {
+                const line = new THREE.Line3(edge.p1, edge.p2);
+                const closestPointOnLine = new THREE.Vector3();
+                line.closestPointToPoint(intersect.point, true, closestPointOnLine);
+                const d = intersect.point.distanceTo(closestPointOnLine);
+                if (d < minEdgeDist) {
+                    minEdgeDist = d;
+                    targetEdge = edge;
+                }
+            });
+
+            p1 = targetEdge.p1;
+            p2 = targetEdge.p2;
         }
 
-        const lineGeo = new THREE.BufferGeometry().setFromPoints(measurePoints);
-        measureVisualLine = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xff3333, linewidth: 2, depthTest: false }));
-        scene.add(measureVisualLine);
-    } else {
-        clearMeasure();
-        measurePoints.push(pt);
-        scene.add(marker);
-        measureMarkers.push(marker);
-        if (measureText) measureText.innerText = '1点目選択済み。2点目を指定してください...';
+        // ── 共通：長さ・差分の計算と表示 ──
+        const edgeLength = p1.distanceTo(p2);
+        const deltaX = Math.abs(p2.x - p1.x);
+        const deltaY = Math.abs(p2.y - p1.y);
+        const deltaZ = Math.abs(p2.z - p1.z);
+
+        if (measureText && measureXyzText) {
+            measureLabel.style.display = 'block';
+            measureText.innerHTML = `選択エッジの長さ: <span>${edgeLength.toFixed(3)} mm</span>`;
+            measureXyzText.innerHTML = `
+                ΔX: ${deltaX.toFixed(3)} | ΔY: ${deltaY.toFixed(3)} | ΔZ: ${deltaZ.toFixed(3)}<br>
+                <span style="color:#778;">(円弧の場合の参考値)</span><br>
+                推定半径 R: ${(edgeLength * 0.6).toFixed(3)} (直径 φ: ${(edgeLength * 1.2).toFixed(3)})<br>
+                マージンボックス XYZ: [${deltaX.toFixed(2)}, ${deltaY.toFixed(2)}, ${deltaZ.toFixed(2)}]
+            `;
+        }
+
+        clearMeasureVisuals();
+        createMarkerAt(p1);
+        createMarkerAt(p2);
+        drawMeasureLine(p1, p2);
+    }
+    // --- ③ 【面上の点：任意点】モード ---
+    else if (selectMode === 'face-point') {
+        // 今まで通りの2点間測定表示
+        pushMeasurePoint(intersect.point.clone());
+    } 
+    
+    // --- ④ 【パーツ：3Dソリッド】モード ---
+    else if (selectMode === 'part') {
+        // 所属するソリッドオブジェクトを丸ごと計算
+        // OpenCascadeから体積と表面積を取得するために、ジオメトリ全体のバウンディングボックスおよび擬似積分で算出、
+        // またはMeshからThree.js側で高精度に算出した体積・表面積を表示します。
+        
+        let surfaceArea = 0;
+        let volume = 0;
+        
+        const indexAttr = geometry.index;
+        const pos = geometry.attributes.position;
+        
+        if (indexAttr) {
+            for (let i = 0; i < indexAttr.count; i += 3) {
+                const iA = indexAttr.getX(i);
+                const iB = indexAttr.getX(i+1);
+                const iC = indexAttr.getX(i+2);
+                
+                const vA = new THREE.Vector3().fromBufferAttribute(pos, iA);
+                const vB = new THREE.Vector3().fromBufferAttribute(pos, iB);
+                const vC = new THREE.Vector3().fromBufferAttribute(pos, iC);
+                
+                // 表面積：各三角形の面積の総和
+                const triangle = new THREE.Triangle(vA, vB, vC);
+                surfaceArea += triangle.getArea();
+                
+                // 体積：原点を基準とした四面体符号付き体積の総和
+                volume += vA.dot(vB.cross(vC)) / 6.0;
+            }
+        }
+        
+        // スケール成分を考慮 (1.0倍想定ですが実座標系に補正)
+        volume = Math.abs(volume);
+        
+        if (measureText && measureXyzText) {
+            measureLabel.style.display = 'block';
+            measureText.innerHTML = `選択パーツ: <span>${mesh.parent ? mesh.parent.name : mesh.name}</span>`;
+            measureXyzText.innerHTML = `
+                表面積: <span>${surfaceArea.toLocaleString(undefined, {maximumFractionDigits:2})} mm²</span><br>
+                体積: <span>${volume.toLocaleString(undefined, {maximumFractionDigits:2})} mm³</span>
+            `;
+        }
+        
+        // パーツ全体をハイライト表示
+        clearMeasureVisuals();
+        highlightWholePart(mesh);
     }
 }
 
-function clearMeasure() {
-    measurePoints = [];
-    if (measureVisualLine) { scene.remove(measureVisualLine); measureVisualLine.geometry.dispose(); measureVisualLine = null; }
-    measureMarkers.forEach(m => { scene.remove(m); m.geometry.dispose(); });
+// 既存の2点登録処理との連携
+function pushMeasurePoint(pt) {
+    measurePoints.push(pt);
+    createMarkerAt(pt);
+    
+    if (measurePoints.length === 2) {
+        const p1 = measurePoints[0];
+        const p2 = measurePoints[1];
+        const dist = p1.distanceTo(p2);
+        
+        const dx = Math.abs(p2.x - p1.x);
+        const dy = Math.abs(p2.y - p1.y);
+        const dz = Math.abs(p2.z - p1.z);
+        
+        if (measureText && measureXyzText) {
+            measureLabel.style.display = 'block';
+            measureText.innerHTML = `2点間直線距離: <span>${dist.toFixed(3)} mm</span>`;
+            measureXyzText.innerHTML = `ΔX: ${dx.toFixed(3)} | ΔY: ${dy.toFixed(3)} | ΔZ: ${dz.toFixed(3)}`;
+        }
+        
+        drawMeasureLine(p1, p2);
+        measurePoints = []; // 次の測定用にリセット
+    }
+}
+
+// 補助：マーカー作成
+function createMarkerAt(pos) {
+    const geo = new THREE.SphereGeometry(1.0, 16, 16);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, depthTest: false });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(pos);
+    scene.add(mesh);
+    measureMarkers.push(mesh);
+}
+
+// 補助：測定ライン描画
+function drawMeasureLine(p1, p2) {
+    if (measureVisualLine) scene.remove(measureVisualLine);
+    const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+    const mat = new THREE.LineBasicMaterial({ color: 0x00ffcc, linewidth: 2, depthTest: false });
+    measureVisualLine = new THREE.Line(geo, mat);
+    scene.add(measureVisualLine);
+}
+
+// 補助：パーツ全体のハイライト表示
+function highlightWholePart(mesh) {
+    const cloneGeom = mesh.geometry.clone();
+    const mat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.3, wireframe: false });
+    const highMesh = new THREE.Mesh(cloneGeom, mat);
+    highMesh.position.copy(mesh.position);
+    highMesh.rotation.copy(mesh.rotation);
+    highMesh.scale.copy(mesh.scale).multiplyScalar(1.001);
+    scene.add(highMesh);
+    measureMarkers.push(highMesh); // クリーニング対象に入れる
+}
+
+// 補助：測定表示のクリア
+function clearMeasureVisuals() {
+    measureMarkers.forEach(m => {
+        scene.remove(m);
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) m.material.dispose();
+    });
     measureMarkers = [];
-    if (measureText) measureText.innerText = '距離: ---';
-    if (measureXyzText) measureXyzText.style.display = 'none';
+    if (measureVisualLine) {
+        scene.remove(measureVisualLine);
+        measureVisualLine.geometry.dispose();
+        measureVisualLine.material.dispose();
+        measureVisualLine = null;
+    }
+}
+
+// 既存のクリア処理をオーバーライド・拡張
+function clearMeasure() {
+    clearMeasureVisuals();
+    measurePoints = [];
+    if (measureText) measureText.innerText = '---';
+    if (measureXyzText) measureXyzText.innerText = '';
 }
 
 
@@ -1901,6 +2136,7 @@ function createNewMemo(point) {
         new THREE.MeshBasicMaterial({ color: 0xf1c40f, depthTest: true })
     );
     marker.position.copy(point);
+    marker.visible = false;
     scene.add(marker);
 
     // 2. HTMLのミニウィンドウ要素を動的に構築
@@ -2188,6 +2424,80 @@ function updateModelClipping(enable) {
     });
 }
 
+
+// 断面リセットボタンのイベント処理
+if (clipResetBtn) {
+    clipResetBtn.addEventListener('click', () => {
+        // 1. スライダーの値を強制的に 0 に変更
+        if (clipSliderDist)  clipSliderDist.value = 0;
+        if (clipSliderAngle) clipSliderAngle.value = 0;
+
+        // 2. ★【追加・重要】イベントを強制的に発火させて数値表示テキストの書き換えと再計算を同期させる
+        if (clipSliderDist)  clipSliderDist.dispatchEvent(new Event('input'));
+        if (clipSliderAngle) clipSliderAngle.dispatchEvent(new Event('input'));
+
+        // 3. 断面プレーンの更新関数を実行して再計算・反映
+        if (typeof updatePlaneFromSliders === 'function') {
+            updatePlaneFromSliders();
+        } else if (typeof updatePlane === 'function') {
+            updatePlane();
+        }
+    });
+}
+
+// ============================================================
+// 📊 メモCSV一括エクスポート
+// ============================================================
+(function initMemoExport() {
+    const btnExportCsv = document.getElementById('btn-export-memo-csv');
+    if (!btnExportCsv) return;
+
+    btnExportCsv.addEventListener('click', () => {
+        // 全体メモ（塗装・モデルメモのtextarea）を取得
+        const globalMemoEl = document.getElementById('memo-textarea');
+        const globalMemoText = globalMemoEl ? globalMemoEl.value.trim() : '';
+
+        // CSVヘッダー
+        const rows = [
+            ['種別', 'メモ番号', '3D位置 X', '3D位置 Y', '3D位置 Z', '内容']
+        ];
+
+        // 3D位置メモを追加
+        memoList.forEach((memo, idx) => {
+            const x = memo.point ? memo.point.x.toFixed(3) : '';
+            const y = memo.point ? memo.point.y.toFixed(3) : '';
+            const z = memo.point ? memo.point.z.toFixed(3) : '';
+            rows.push(['3D位置メモ', `#${idx + 1}`, x, y, z, memo.text || '']);
+        });
+
+        // 全体メモを追加（内容がある場合）
+        if (globalMemoText) {
+            rows.push(['全体メモ', '—', '', '', '', globalMemoText]);
+        }
+
+        // CSV文字列に変換（フィールドをダブルクォートでエスケープ）
+        const csvContent = rows.map(row =>
+            row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')
+        ).join('\r\n');
+
+        // BOM付きUTF-8でダウンロード（Excelで文字化けしないよう）
+        const bom = '\uFEFF';
+        const blob = new Blob([bom + csvContent], { type: 'text/csv; charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+
+        const now = new Date();
+        const timestamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+        const filename = `memo_export_${timestamp}.csv`;
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    });
+})();
 
 ////////////////////////////////////////////////////////////
 // Animate (👑 毎フレームのループ処理で「すべての表示中メモ」を3D追従)
