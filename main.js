@@ -11,7 +11,6 @@
 //  - 折りたたみ式のパーツ表示切替UI（一括操作対応）
 //  - [追加] 距離測定（最短＋XYZ軸距離）＆測定時のペイント一時停止ガード
 //  - [追加] 3軸・角度・距離対応の高機能メイン画面連携断面切断表示
-//5月30日メモ機能時の色付け停止
 ////////////////////////////////////////////////////////////
 
 
@@ -294,7 +293,7 @@ scene.add(dirLight);
 
 const raycaster = new THREE.Raycaster();
 const mouse     = new THREE.Vector2();
-raycaster.params.Line = { threshold: 0.5 }; // モデルスケールに合わせて調整
+raycaster.params.Line = { threshold: 2.0 }; // edgeLines選択用。モデル読込後に動的調整される
 
 
 
@@ -324,6 +323,13 @@ let isClippingMode = false;
 let measurePoints = [];
 let measureVisualLine = null;
 let measureMarkers = [];
+
+// エッジホバーハイライト用ステート（測定モード・edgeモード専用）
+let hoveredEdgeHighlight = null;  // scene に追加済みの LineSegments オブジェクト
+let hoveredEdgeId = -1;           // 前回ホバーした B-Rep エッジID（変化がなければスキップ）
+let globalEdgeSet   = new Set(); 
+let globalEdgeId    = 0;
+
 
 let currentClipAxis = 'X';
 const localPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
@@ -426,10 +432,15 @@ async function updateProgress(text, percent = null) {
 async function loadStepFile(file) {
     try {
         loading.style.display = 'block';
+        if (typeof globalEdgeSet !== 'undefined' && globalEdgeSet.clear) {
+            globalEdgeSet.clear();
+        } else {
+            window.globalEdgeSet = new Set();
+        }
+        globalEdgeId = 0;
         await updateProgress('ファイルの読み込み中...', 5);
 
-        clearAllMemos(); 
-
+        clearAllMemos();
 
         if (currentModel) {
             scene.remove(currentModel);
@@ -442,7 +453,6 @@ async function loadStepFile(file) {
             currentModel = null;
         }
 
-        // 断面表示モード中だった場合は、パネルとマテリアルクリッピングをリセット
         if (isClippingMode) {
             isClippingMode = false;
             if (btnToolClipping) btnToolClipping.style.background = '';
@@ -457,8 +467,10 @@ async function loadStepFile(file) {
 
         if (partsContainer) partsContainer.innerHTML = '';
 
-        faceGroupMap = new Map(); 
+        faceGroupMap = new Map();
         colorHistory = [];
+        globalEdgeSet.clear();
+        globalEdgeId = 0;
 
         const fileData = new Uint8Array(await file.arrayBuffer());
         oc.FS.createDataFile('/', 'model.step', fileData, true, true, true);
@@ -473,65 +485,136 @@ async function loadStepFile(file) {
             throw new Error('STEP read failed. Status: ' + readResult);
         }
 
-        // OpenCascade内部のトランスファー処理
         reader.TransferRoots(new oc.Message_ProgressRange_1());
-        const shape = reader.OneShape();
+        const rootShape = reader.OneShape();
 
         await updateProgress('ポリゴンメッシュを生成中 (Tessellation)...', 40);
-        
-        // 形状の複雑さに応じて時間がかかるメッシュ化処理
-        new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false);
+        new oc.BRepMesh_IncrementalMesh_2(rootShape, 0.1, false, 0.5, false);
 
         await updateProgress('パーツ構造を解析中...', 60);
+
+        // ════════════════════════════════════════════════════════════════
+        // ★ 修正の核心: TopoDS_Iterator による再帰走査で累積Locationを取得
+        //
+        // STEPのアセンブリは COMPOUND/COMPSOLID の入れ子構造になっている。
+        // TopExp_Explorer でいきなり SOLID を探すと、途中の親ノードが持つ
+        // Location（配置変換）が「積み重ねられない」ままになる。
+        //
+        // TopoDS_Iterator で1段ずつ降りると、各子シェイプの Location は
+        // そのノード単体の変換しか持たないが、
+        //   shape.Located( parentLoc.Multiplied(shape.Location_1()) )
+        // のように親のLocationと合成することで累積変換が得られる。
+        //
+        // この再帰を SOLID まで続けることで、アセンブリ内の全パーツの
+        // 「ワールド座標系における正しいLocation」が取得できる。
+        // ════════════════════════════════════════════════════════════════
+
+        /**
+         * shape のアセンブリツリーを再帰的に辿り、
+         * 葉ノードの SOLID とその累積済み Location をペアで収集する。
+         *
+         * @param {TopoDS_Shape} shape      - 現在のシェイプ
+         * @param {TopLoc_Location} parentLoc - 親から引き継いだ累積 Location
+         * @param {Array} result            - { solid, loc } を積む配列
+         */
+        function collectSolids(shape, parentLoc, result) {
+            const shapeType = shape.ShapeType();
+
+            if (shapeType === oc.TopAbs_ShapeEnum.TopAbs_SOLID) {
+                // ★ parentLoc はすでに「祖先すべての累積 × この SOLID 自身の Location」が
+                //    中間ノード側で合成済み。ここで shape.Location_1() を再取得してはいけない。
+                const finalLoc = parentLoc ?? new oc.TopLoc_Location_1();
+                result.push({ solid: oc.TopoDS.Solid_1(shape), loc: finalLoc });
+                return;
+            }
+
+            const iter = new oc.TopoDS_Iterator_2(shape, true, true);
+            while (iter.More()) {
+                const child    = iter.Value();
+                const childLoc = child.Location_1();
+
+                let combinedLoc;
+                if (parentLoc && !parentLoc.IsIdentity()) {
+                    // ★ 修正: childLoc.Multiplied(parentLoc) が正しい合成順序
+                    // OCCT の Multiplied は「自分 × 引数」なので、
+                    // ワールド変換 = 親 × 子 を正しく得るには
+                    // childLoc.Multiplied(parentLoc) とする必要がある
+                    combinedLoc = childLoc.Multiplied(parentLoc);
+                } else {
+                    combinedLoc = childLoc;
+                }
+
+                collectSolids(child, combinedLoc, result);
+                iter.Next();
+            }
+        }
+
+        const solidEntries = []; // { solid: TopoDS_Solid, loc: TopLoc_Location }[]
+        collectSolids(rootShape, null, solidEntries);
+        // デバッグ: 各Solidの変換行列をコンソール出力
+        solidEntries.forEach((entry, i) => {
+            const trsf = entry.loc.Transformation();
+            const form = trsf.Form();
+            console.log(`Solid[${i}] TransformForm:`, form,
+                'Mat:', [
+                    trsf.Value(1,1).toFixed(3), trsf.Value(1,2).toFixed(3), trsf.Value(1,3).toFixed(3),
+                    trsf.Value(2,1).toFixed(3), trsf.Value(2,2).toFixed(3), trsf.Value(2,3).toFixed(3),
+                    trsf.Value(3,1).toFixed(3), trsf.Value(3,2).toFixed(3), trsf.Value(3,3).toFixed(3),
+                ],
+                'Trans:', [trsf.TranslationPart().X().toFixed(3), trsf.TranslationPart().Y().toFixed(3), trsf.TranslationPart().Z().toFixed(3)]
+            );
+        });
+        const totalSolids = solidEntries.length;
 
         currentModel = new THREE.Group();
         currentModel.userData.name = file.name;
 
-        const edgesMaterial = new THREE.LineBasicMaterial({ 
-            color: 0x555555, 
-            linewidth: 1     
+        const edgesMaterial = new THREE.LineBasicMaterial({
+            color: 0x555555,
+            linewidth: 1
         });
 
-        let globalFaceId = 0;
+        let globalFaceId  = 0;
         let totalTriangles = 0;
 
-        // SOLIDの総数を事前にカウント（進捗計算用）
-        const countExplorer = new oc.TopExp_Explorer_1();
-        countExplorer.Init(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
-        let totalSolids = 0;
-        while (countExplorer.More()) {
-            totalSolids++;
-            countExplorer.Next();
-        }
-
-        // SOLID（塊）単位で探索してパーツを個別に構築
-        const solidExplorer = new oc.TopExp_Explorer_1();
-        solidExplorer.Init(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
-
-        let solidId = 0;
-
-        while (solidExplorer.More()) {
-            // パーツごとの進捗率を計算 (60% 〜 95% の間をソリッド数で分割)
+        // ════════════════════════════════════════════════════════════════
+        // 各 SOLID を累積済み Location を使って処理
+        // ════════════════════════════════════════════════════════════════
+        for (let solidId = 0; solidId < totalSolids; solidId++) {
             const currentPercent = 60 + Math.floor((solidId / (totalSolids || 1)) * 35);
             await updateProgress(`パーツ構築中 (${solidId + 1} / ${totalSolids})...`, currentPercent);
 
-            const solid = oc.TopoDS.Solid_1(solidExplorer.Current());
+            const { solid, loc: assemblyLoc } = solidEntries[solidId];
+
+            // 累積 Location から gp_Trsf を取得
+            const hasSolidTrsf = assemblyLoc && !assemblyLoc.IsIdentity();
+            const solidTrsf    = hasSolidTrsf ? assemblyLoc.Transformation() : null;
+
+            // ヘルパー: 点（位置ベクトル）に累積変換を適用
+            function applyAssemblyTrsf(x, y, z) {
+                return [x, y, z];
+            }
+
+            // ★ 追加: 法線（方向ベクトル）に累積変換の回転部分のみ適用
+            // gp_Vec.Transformed() は平行移動を無視して回転・スケールのみ適用される
+            function applyAssemblyTrsfNormal(nx, ny, nz) {
+                return [nx, ny, nz];
+            }
 
             const partPositions = [];
             const partNormals   = [];
             const partIndices   = [];
             const partFaceIds   = [];
-
             let partVertexOffset = 0;
-            let partTriCounter = 0;
+            let partTriCounter   = 0;
 
             const faceExplorer = new oc.TopExp_Explorer_1();
             faceExplorer.Init(solid, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
 
             while (faceExplorer.More()) {
                 const face       = oc.TopoDS.Face_1(faceExplorer.Current());
-                const location   = new oc.TopLoc_Location_1();
-                const polyHandle = oc.BRep_Tool.Triangulation(face, location);
+                const faceLoc    = new oc.TopLoc_Location_1();
+                const polyHandle = oc.BRep_Tool.Triangulation(face, faceLoc);
 
                 if (polyHandle.IsNull()) {
                     faceExplorer.Next();
@@ -542,26 +625,42 @@ async function loadStepFile(file) {
                 const tris       = polyHandle.get();
                 const nNodes     = tris.NbNodes();
                 const nTris      = tris.NbTriangles();
-                const hasTrsf    = !location.IsIdentity();
-                const trsf       = hasTrsf ? location.Transformation() : null;
-                const isReversed = face.Orientation_1() === oc.TopAbs_Orientation.TopAbs_REVERSED;
-                const sign       = isReversed ? -1 : 1;
-                const hasNormals = tris.HasNormals();
+                const hasFaceTrsf = !faceLoc.IsIdentity();
+                const faceTrsf    = hasFaceTrsf ? faceLoc.Transformation() : null;
+                const isReversed  = face.Orientation_1() === oc.TopAbs_Orientation.TopAbs_REVERSED;
+                const sign        = isReversed ? -1 : 1;
+                const hasNormals  = tris.HasNormals();
 
                 for (let v = 1; v <= nNodes; v++) {
                     const pnt = tris.Node(v);
                     let x = pnt.X(), y = pnt.Y(), z = pnt.Z();
 
-                    if (hasTrsf && trsf) {
-                        const tp = pnt.Transformed(trsf);
+                    // ① 面のローカル変換
+                    if (hasFaceTrsf && faceTrsf) {
+                        const tp = pnt.Transformed(faceTrsf);
                         x = tp.X(); y = tp.Y(); z = tp.Z();
                     }
+                    // ② アセンブリ累積変換
+                    [x, y, z] = applyAssemblyTrsf(x, y, z);
+
                     partPositions.push(x, y, z);
                     partFaceIds.push(globalFaceId);
 
                     if (hasNormals) {
                         const n = tris.Normal(v);
-                        partNormals.push(n.X() * sign, n.Y() * sign, n.Z() * sign);
+                        let nx = n.X() * sign;
+                        let ny = n.Y() * sign;
+                        let nz = n.Z() * sign;
+
+                        // ① 面のローカル回転を法線に適用
+                        if (hasFaceTrsf && faceTrsf) {
+                            const tn = new oc.gp_Vec_1(nx, ny, nz).Transformed(faceTrsf);
+                            nx = tn.X(); ny = tn.Y(); nz = tn.Z();
+                        }
+                        // ② アセンブリ累積回転を法線に適用
+                        [nx, ny, nz] = applyAssemblyTrsfNormal(nx, ny, nz);
+
+                        partNormals.push(nx, ny, nz);
                     } else {
                         partNormals.push(0, 1, 0);
                     }
@@ -573,104 +672,300 @@ async function loadStepFile(file) {
                     const i1  = tri.Value(1) - 1 + partVertexOffset;
                     const i2  = tri.Value(2) - 1 + partVertexOffset;
                     const i3  = tri.Value(3) - 1 + partVertexOffset;
-
                     if (isReversed) {
                         partIndices.push(i1, i3, i2);
                     } else {
                         partIndices.push(i1, i2, i3);
                     }
-
                     triGroup.push(partTriCounter++);
                     totalTriangles++;
                 }
 
                 faceGroupMap.set(globalFaceId, triGroup);
-
                 partVertexOffset += nNodes;
                 globalFaceId++;
                 faceExplorer.Next();
             }
 
-            if (partPositions.length > 0) {
-                const geometry = new THREE.BufferGeometry();
-                geometry.setAttribute('position', new THREE.Float32BufferAttribute(partPositions, 3));
-                geometry.setAttribute('normal', new THREE.Float32BufferAttribute(partNormals, 3));
-                
-                const faceIdArray = new Float32Array(partFaceIds);
-                geometry.setAttribute('faceId', new THREE.BufferAttribute(faceIdArray, 1));
-                geometry.setIndex(partIndices);
+            if (partPositions.length === 0) continue;
 
-                const hasZeroNormal = partNormals.some((v, i) =>
-                    i % 3 === 1 && partNormals[i-1] === 0 && v === 1 && partNormals[i+1] === 0
-                );
-                if (hasZeroNormal) {
-                    geometry.computeVertexNormals();
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(partPositions, 3));
+            geometry.setAttribute('normal',   new THREE.Float32BufferAttribute(partNormals, 3));
+
+            const faceIdArray = new Float32Array(partFaceIds);
+            geometry.setAttribute('faceId', new THREE.BufferAttribute(faceIdArray, 1));
+            geometry.setIndex(partIndices);
+
+            const hasZeroNormal = partNormals.some((v, i) =>
+                i % 3 === 1 && partNormals[i - 1] === 0 && v === 1 && partNormals[i + 1] === 0
+            );
+            if (hasZeroNormal) geometry.computeVertexNormals();
+
+            const vertexCount  = partPositions.length / 3;
+            const defaultColor = new THREE.Color('#ecf0f1');
+            const colors       = new Float32Array(vertexCount * 3);
+            for (let i = 0; i < vertexCount; i++) {
+                colors[i * 3]     = defaultColor.r;
+                colors[i * 3 + 1] = defaultColor.g;
+                colors[i * 3 + 2] = defaultColor.b;
+            }
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = new THREE.MeshStandardMaterial({
+                vertexColors: true,
+                metalness: 0.05,
+                roughness: 0.65,
+            });
+
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.name = `Solid_Part_${solidId}`;
+            mesh.castShadow    = true;
+            mesh.receiveShadow = true;
+
+            // ── B-Rep エッジからポリラインを構築 ────────────────────────
+
+            const CURVE_SAMPLE_STEPS = 24;
+            const brepEdgePositions  = [];
+            const brepEdgeIds        = [];
+
+            const edgeExp = new oc.TopExp_Explorer_1();
+            edgeExp.Init(solid, oc.TopAbs_ShapeEnum.TopAbs_EDGE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+
+            while (edgeExp.More()) {
+                const edge = oc.TopoDS.Edge_1(edgeExp.Current());
+
+                if (oc.BRep_Tool.Degenerated(edge)) {
+                    edgeExp.Next();
+                    continue;
                 }
 
-                const vertexCount = partPositions.length / 3;
-                const defaultColor = new THREE.Color('#ecf0f1');
-                const colors = new Float32Array(vertexCount * 3);
-                for (let i = 0; i < vertexCount; i++) {
-                    colors[i * 3]     = defaultColor.r;
-                    colors[i * 3 + 1] = defaultColor.g;
-                    colors[i * 3 + 2] = defaultColor.b;
+                // ★ edgeKey に solidId を含めて同一形状の別インスタンスを区別
+                let edgeKey = null;
+                try {
+                    const u1Ref = { current: 0 }, u2Ref = { current: 0 };
+                    oc.BRep_Tool.Range_1(edge, u1Ref, u2Ref);
+                    const pFirst = oc.BRep_Tool.Pnt(oc.TopExp.FirstVertex_1(edge));
+                    const pLast  = oc.BRep_Tool.Pnt(oc.TopExp.LastVertex_1(edge));
+                    edgeKey = `s${solidId}_${u1Ref.current.toFixed(4)}_${u2Ref.current.toFixed(4)}_` +
+                              `${pFirst.X().toFixed(4)}_${pFirst.Y().toFixed(4)}_${pFirst.Z().toFixed(4)}_` +
+                              `${pLast.X().toFixed(4)}_${pLast.Y().toFixed(4)}_${pLast.Z().toFixed(4)}`;
+                } catch (_) {
+                    if (edge && edge.$$) edgeKey = `s${solidId}_ptr_${edge.$$.ptr}`;
                 }
-                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-                const material = new THREE.MeshStandardMaterial({
-                    vertexColors: true,
-                    metalness:    0.05,
-                    roughness:    0.65,
-                });
+                if (edgeKey && globalEdgeSet.has(edgeKey)) { edgeExp.Next(); continue; }
+                if (edgeKey) globalEdgeSet.add(edgeKey);
 
-                const mesh = new THREE.Mesh(geometry, material);
-                mesh.name = `Solid_Part_${solidId}`;
-                mesh.castShadow = true;
-                mesh.receiveShadow = true;
+                const assignedGlobalId = globalEdgeId;
+                let edgeHandled = false;
 
-                const edgesGeometry = new THREE.EdgesGeometry(geometry, 24);
-                const edgeLines = new THREE.LineSegments(edgesGeometry, edgesMaterial);
-                edgeLines.name = 'edgeLines';
-                edgeLines.visible = showEdges;
+                // 優先① Polygon3D
+                const locPoly      = new oc.TopLoc_Location_1();
+                const poly3dHandle = oc.BRep_Tool.Polygon3D(edge, locPoly);
+                if (!poly3dHandle.IsNull()) {
+                    const poly3d    = poly3dHandle.get();
+                    const nPts      = poly3d.NbNodes();
+                    const hasP3Trsf = !locPoly.IsIdentity();
+                    const p3Trsf    = hasP3Trsf ? locPoly.Transformation() : null;
 
-                const partGroup = new THREE.Group();
-                partGroup.name = `PartGroup_Solid_${solidId}`;
-                partGroup.add(mesh);
-                partGroup.add(edgeLines);
+                    for (let pi = 1; pi <= nPts - 1; pi++) {
+                        const pA = poly3d.Nodes().Value(pi);
+                        const pB = poly3d.Nodes().Value(pi + 1);
+                        let ax = pA.X(), ay = pA.Y(), az = pA.Z();
+                        let bx = pB.X(), by = pB.Y(), bz = pB.Z();
+                        if (hasP3Trsf && p3Trsf) {
+                            const tpA = pA.Transformed(p3Trsf);
+                            const tpB = pB.Transformed(p3Trsf);
+                            ax = tpA.X(); ay = tpA.Y(); az = tpA.Z();
+                            bx = tpB.X(); by = tpB.Y(); bz = tpB.Z();
+                        }
+                        [ax, ay, az] = applyAssemblyTrsf(ax, ay, az);
+                        [bx, by, bz] = applyAssemblyTrsf(bx, by, bz);
+                        brepEdgePositions.push(ax, ay, az, bx, by, bz);
+                        brepEdgeIds.push(assignedGlobalId, assignedGlobalId);
+                    }
+                    edgeHandled = true;
+                }
 
-                currentModel.add(partGroup);
-                solidId++;
+                // 優先② 3D曲線サンプリング
+                if (!edgeHandled) {
+                    try {
+                        const u1Ref = { current: 0 }, u2Ref = { current: 0 };
+                        const curve3dHandle = oc.BRep_Tool.Curve_1(edge, u1Ref, u2Ref);
+                        if (!curve3dHandle.IsNull()) {
+                            const curve3d     = curve3dHandle.get();
+                            const edgeLoc     = edge.Location_1();
+                            const hasEdgeTrsf = !edgeLoc.IsIdentity();
+                            const edgeTrsf    = hasEdgeTrsf ? edgeLoc.Transformation() : null;
+                            const sampledPts  = [];
+
+                            for (let si = 0; si <= CURVE_SAMPLE_STEPS; si++) {
+                                const t   = u1Ref.current + (u2Ref.current - u1Ref.current) * (si / CURVE_SAMPLE_STEPS);
+                                const p3d = curve3d.Value(t);
+                                let x = p3d.X(), y = p3d.Y(), z = p3d.Z();
+                                if (hasEdgeTrsf && edgeTrsf) {
+                                    const tp = p3d.Transformed(edgeTrsf);
+                                    x = tp.X(); y = tp.Y(); z = tp.Z();
+                                }
+                                [x, y, z] = applyAssemblyTrsf(x, y, z);
+                                sampledPts.push(x, y, z);
+                            }
+                            for (let si = 0; si < CURVE_SAMPLE_STEPS; si++) {
+                                const base = si * 3;
+                                brepEdgePositions.push(
+                                    sampledPts[base],     sampledPts[base + 1], sampledPts[base + 2],
+                                    sampledPts[base + 3], sampledPts[base + 4], sampledPts[base + 5]
+                                );
+                                brepEdgeIds.push(assignedGlobalId, assignedGlobalId);
+                            }
+                            edgeHandled = true;
+                        }
+                    } catch (e) { console.debug(e); }
+                }
+
+                // 優先③ CurveOnSurface
+                if (!edgeHandled) {
+                    try {
+                        const faceExpC = new oc.TopExp_Explorer_1();
+                        faceExpC.Init(solid, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+                        while (faceExpC.More() && !edgeHandled) {
+                            const faceC      = oc.TopoDS.Face_1(faceExpC.Current());
+                            const locC       = new oc.TopLoc_Location_1();
+                            const u1Ref      = { current: 0 }, u2Ref = { current: 0 };
+                            const curveHandle = oc.BRep_Tool.CurveOnSurface_1(edge, faceC, u1Ref, u2Ref);
+                            if (curveHandle.IsNull()) { faceExpC.Next(); continue; }
+                            const surfHandle = oc.BRep_Tool.Surface_2(faceC, locC);
+                            if (surfHandle.IsNull()) { faceExpC.Next(); continue; }
+
+                            const surf       = surfHandle.get();
+                            const pcurve     = curveHandle.get();
+                            const hasSurfTrsf = !locC.IsIdentity();
+                            const surfTrsf2   = hasSurfTrsf ? locC.Transformation() : null;
+                            const sampledPts  = [];
+
+                            for (let si = 0; si <= CURVE_SAMPLE_STEPS; si++) {
+                                const t   = u1Ref.current + (u2Ref.current - u1Ref.current) * (si / CURVE_SAMPLE_STEPS);
+                                const uv  = pcurve.Value(t);
+                                const p3d = surf.Value(uv.X(), uv.Y());
+                                let sx = p3d.X(), sy = p3d.Y(), sz = p3d.Z();
+                                if (hasSurfTrsf && surfTrsf2) {
+                                    const tp = p3d.Transformed(surfTrsf2);
+                                    sx = tp.X(); sy = tp.Y(); sz = tp.Z();
+                                }
+                                [sx, sy, sz] = applyAssemblyTrsf(sx, sy, sz);
+                                sampledPts.push(sx, sy, sz);
+                            }
+                            for (let si = 0; si < CURVE_SAMPLE_STEPS; si++) {
+                                const base = si * 3;
+                                brepEdgePositions.push(
+                                    sampledPts[base],     sampledPts[base + 1], sampledPts[base + 2],
+                                    sampledPts[base + 3], sampledPts[base + 4], sampledPts[base + 5]
+                                );
+                                brepEdgeIds.push(assignedGlobalId, assignedGlobalId);
+                            }
+                            edgeHandled = true;
+                            faceExpC.Next();
+                        }
+                    } catch (e) { console.debug(e); }
+                }
+
+                // 優先④ PolygonOnTriangulation
+                if (!edgeHandled) {
+                    const faceExp2 = new oc.TopExp_Explorer_1();
+                    faceExp2.Init(solid, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+                    while (faceExp2.More() && !edgeHandled) {
+                        const face2     = oc.TopoDS.Face_1(faceExp2.Current());
+                        const loc2      = new oc.TopLoc_Location_1();
+                        const triH      = oc.BRep_Tool.Triangulation(face2, loc2);
+                        if (triH.IsNull()) { faceExp2.Next(); continue; }
+                        const polyOnTriH = oc.BRep_Tool.PolygonOnTriangulation_1(edge, triH, loc2);
+                        if (polyOnTriH.IsNull()) { faceExp2.Next(); continue; }
+
+                        const polyOnTri  = polyOnTriH.get();
+                        const tris2      = triH.get();
+                        const nPts2      = polyOnTri.NbNodes();
+                        const hasTrsf2   = !loc2.IsIdentity();
+                        const trsf2      = hasTrsf2 ? loc2.Transformation() : null;
+
+                        for (let pi = 1; pi <= nPts2 - 1; pi++) {
+                            const pA = tris2.Node(polyOnTri.Nodes().Value(pi));
+                            const pB = tris2.Node(polyOnTri.Nodes().Value(pi + 1));
+                            let ax = pA.X(), ay = pA.Y(), az = pA.Z();
+                            let bx = pB.X(), by = pB.Y(), bz = pB.Z();
+                            if (hasTrsf2 && trsf2) {
+                                const tpA = pA.Transformed(trsf2);
+                                const tpB = pB.Transformed(trsf2);
+                                ax = tpA.X(); ay = tpA.Y(); az = tpA.Z();
+                                bx = tpB.X(); by = tpB.Y(); bz = tpB.Z();
+                            }
+                            [ax, ay, az] = applyAssemblyTrsf(ax, ay, az);
+                            [bx, by, bz] = applyAssemblyTrsf(bx, by, bz);
+                            brepEdgePositions.push(ax, ay, az, bx, by, bz);
+                            brepEdgeIds.push(assignedGlobalId, assignedGlobalId);
+                        }
+                        edgeHandled = true;
+                        faceExp2.Next();
+                    }
+                }
+
+                globalEdgeId++;
+                edgeExp.Next();
             }
 
-            solidExplorer.Next();
+            const partGroup = new THREE.Group();
+            partGroup.name  = `PartGroup_Solid_${solidId}`;
+            partGroup.add(mesh);
+
+            let edgeLines;
+            if (brepEdgePositions.length > 0) {
+                const edgeGeom = new THREE.BufferGeometry();
+                edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(brepEdgePositions, 3));
+                edgeGeom.setAttribute('edgeId', new THREE.BufferAttribute(new Float32Array(brepEdgeIds), 1));
+                const edgeMaterial = new THREE.LineBasicMaterial({
+                    color: 0x3b82f6,
+                    linewidth: 1,
+                    transparent: true,
+                    opacity: 0.85
+                });
+                edgeLines = new THREE.LineSegments(edgeGeom, edgeMaterial);
+                edgeLines.raycast = THREE.LineSegments.prototype.raycast;
+            } else if (mesh && mesh.geometry) {
+                edgeLines = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(mesh.geometry, 24),
+                    edgesMaterial
+                );
+            }
+
+            if (edgeLines) {
+                edgeLines.name    = 'edgeLines';
+                edgeLines.visible = showEdges;
+                partGroup.add(edgeLines);
+            }
+
+            currentModel.add(partGroup);
         }
 
         await updateProgress('画面の描画を最適化中...', 98);
 
-        // パーツ表示切替用チェックボックスの動的生成
         if (partsContainer) {
             partsContainer.innerHTML = '';
-            
             currentModel.children.forEach((partGroup) => {
                 if (partGroup.isGroup && partGroup.name.startsWith('PartGroup_Solid_')) {
-                    const solidIdx = partGroup.name.replace('PartGroup_Solid_', '');
+                    const solidIdx    = partGroup.name.replace('PartGroup_Solid_', '');
                     const partLabelText = `パーツ ${Number(solidIdx) + 1}`;
 
-                    const label = document.createElement('label');
+                    const label    = document.createElement('label');
                     label.className = 'part-check-label';
-
                     const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
+                    checkbox.type    = 'checkbox';
                     checkbox.checked = true;
 
                     checkbox.addEventListener('change', (e) => {
                         partGroup.visible = e.target.checked;
-                        if (!e.target.checked) {
-                            clearHighlight();
-                        }
+                        if (!e.target.checked) clearHighlight();
                     });
 
-                    // 文字列（ラベル）にマウスオーバーしたときの連動ハイライト
                     label.addEventListener('mouseenter', () => {
                         clearHighlight();
                         const mesh = partGroup.children.find(child => child.isMesh);
@@ -681,33 +976,21 @@ async function loadStepFile(file) {
                         highlightGroup.name = 'dynamicHighlightGroup';
 
                         const faceMat = new THREE.MeshBasicMaterial({
-                            color: 0xff0000,
-                            transparent: true,
-                            opacity: 0.35, 
-                            side: THREE.DoubleSide,
-                            depthTest: true,
-                            depthWrite: false
+                            color: 0xff0000, transparent: true, opacity: 0.35,
+                            side: THREE.DoubleSide, depthTest: true, depthWrite: false
                         });
-                        const highlightMesh = new THREE.Mesh(highlightGeom, faceMat);
-                        highlightGroup.add(highlightMesh);
+                        highlightGroup.add(new THREE.Mesh(highlightGeom, faceMat));
 
-                        const edgesGeom = new THREE.EdgesGeometry(highlightGeom, 24);
                         const edgesMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 1, depthTest: true });
-                        const highlightEdgeMesh = new THREE.LineSegments(edgesGeom, edgesMat);
-                        highlightGroup.add(highlightEdgeMesh);
+                        highlightGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(highlightGeom, 24), edgesMat));
 
                         highlightGroup.position.copy(mesh.position);
                         highlightGroup.rotation.copy(mesh.rotation);
-                        highlightGroup.scale.copy(mesh.scale);
-                        highlightGroup.scale.multiplyScalar(1.0005);
-
+                        highlightGroup.scale.copy(mesh.scale).multiplyScalar(1.0005);
                         scene.add(highlightGroup);
                     });
 
-                    label.addEventListener('mouseleave', () => {
-                        clearHighlight();
-                    });
-
+                    label.addEventListener('mouseleave', () => clearHighlight());
                     label.appendChild(checkbox);
                     label.appendChild(document.createTextNode(partLabelText));
                     partsContainer.appendChild(label);
@@ -718,14 +1001,19 @@ async function loadStepFile(file) {
         scene.add(currentModel);
         triCountLabel.innerText = totalTriangles.toLocaleString();
 
-        triggerAutoFit();
-        
-        await updateProgress('インポート完了！', 100);
-        setTimeout(() => {
-            loading.style.display = 'none';
-        }, 300);
+        {
+            const box    = new THREE.Box3().setFromObject(currentModel);
+            const size   = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            raycaster.params.Line = { threshold: Math.max(0.5, maxDim * 0.008) };
+        }
 
-        console.log(`STEP loaded by Solid: ${solidId} genuine parts found, ${globalFaceId} total faces.`);
+        triggerAutoFit();
+        await updateProgress('インポート完了！', 100);
+        setTimeout(() => { loading.style.display = 'none'; }, 300);
+
+        console.log(`STEP loaded: ${totalSolids} parts, ${globalFaceId} faces.`);
+        console.log(`総有効一意エッジ数: ${globalEdgeId}`);
 
     } catch (err) {
         console.error(err);
@@ -734,22 +1022,76 @@ async function loadStepFile(file) {
     }
 }
 
-
 ////////////////////////////////////////////////////////////
 // Paint Core
 ////////////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////////////
+// マウスクリック時の判定・処理 (測定エッジ/面ペイント)
+////////////////////////////////////////////////////////////
 function checkAndPaint(clientX, clientY) {
-    if (!currentModel || !faceGroupMap) return;
+    
+    const selectModeElem = document.querySelector('input[name="selectMode"]:checked');
+    const isEdgeSelection = selectModeElem && selectModeElem.value.toLowerCase() === 'edge';
+    console.log("isEdgeSelection")
+    console.log(isEdgeSelection)
+    if (isEdgeSelection) {
+        // 線を精密に感知するために threshold を設定
+        raycaster.params.Line = { threshold: 0.4 };
+        
+        console.log("🚀 【確認】isEdgeSelectionのブロックに正常に進入しました！");
+        const intersects = raycaster.intersectObjects(currentModel.children, true);
+        const edgeIntersect = intersects.find(hit => hit.object.isLineSegments && hit.object.name === 'edgeLines');
+        
+        if (edgeIntersect && edgeIntersect.object.parent && edgeIntersect.object.parent.visible !== false) {
+            const clickedPoint = edgeIntersect.point;
+            const geometry = edgeIntersect.object.geometry;
+            const edgeIdAttr = geometry.attributes.edgeId;
+            
+            if (edgeIdAttr && edgeIntersect.index !== undefined) {
 
-    const rect = canvas.getBoundingClientRect();
-    mouse.x =  ((clientX - rect.left) / rect.width)  * 2 - 1;
-    mouse.y = -((clientY - rect.top)  / rect.height) * 2 + 1;
+                const clickedEdgeId = edgeIdAttr.array[edgeIntersect.index];
+                
+                console.log(`🎯 [測定システム検知] 選択された実際のエッジID: ${clickedEdgeId} (元インデックス: ${edgeIntersect.index})`);
+                const allEdgeIds = Array.from(edgeIdAttr.array);
+                console.log("📊 【データ検証】このパーツに含まれる全頂点のエッジIDリスト（総頂点数: " + allEdgeIds.length + "):", allEdgeIds);
 
-    raycaster.setFromCamera(mouse, camera);
+                // ユニーク（重複排除）なIDのリストだけをスッキリ見たい場合はこちらも便利です
+                const uniqueEdgeIds = [...new Set(allEdgeIds)];
+                console.log("✨ 【データ検証】このパーツを構成する一意なエッジIDの一覧:", uniqueEdgeIds);
+                // 画面表示用のラベルを更新（もしUIにエッジID表示用の場所があれば連動）
+                if (faceIdLabel) faceIdLabel.innerText = clickedEdgeId;
+                if (meshNameLabel) meshNameLabel.innerText = `Edge_${clickedEdgeId}`;
+            } else {
+                console.log("⚠️ エッジは感知しましたが、geometryにedgeId属性がありません:", clickedPoint);
+            }
+            
+            // 💡 測定モードがONの場合のみ、距離測定用配列へ座標を登録
+            if (isMeasureMode) {
+                if (typeof addMeasurePoint === 'function') {
+                    console.log("1")
+                    addMeasurePoint(clickedPoint);
+                } else if (typeof measurePoints !== 'undefined') {
+                    console.log("2")
+                    measurePoints.push(clickedPoint);
+                    if (typeof updateMeasureVisuals === 'function') {
+                        console.log("3")
+                        updateMeasureVisuals();
+                    }
+                }
+            }
+            return; // エッジ判定を完了したため、後続の面ペイント処理には流さない
+        } else {
+            console.log("ℹ️ エッジモードですが、クリックした位置にエッジ線（edgeLines）がヒットしませんでした。");
+        }
+    }
 
+    // ────────────────────────────────────────────────────────
+    // 📦 従来の処理（通常モード時の面・パーツのカラーペイント判定）
+    // ────────────────────────────────────────────────────────
     const intersects = raycaster.intersectObjects(currentModel.children, true);
     if (intersects.length === 0) return;
+    if (isEdgeSelection) return;
 
     const intersect = intersects.find(hit => hit.object.isMesh);
     if (!intersect) return;
@@ -761,16 +1103,15 @@ function checkAndPaint(clientX, clientY) {
     if (hitTriangle === undefined) return;
 
     const targetMesh = intersect.object;
-    const geometry   = targetMesh.geometry;
-    const indexAttr  = geometry.index;
+    const geometry = targetMesh.geometry;
+    const indexAttr = geometry.index;
     const faceIdAttr = geometry.attributes.faceId;
-
     if (!indexAttr || !faceIdAttr) return;
 
     const vertexIndex = indexAttr.getX(hitTriangle * 3);
-    const faceIdVal   = Math.round(faceIdAttr.getX(vertexIndex));
+    const faceIdVal = Math.round(faceIdAttr.getX(vertexIndex));
 
-    if (faceIdLabel) faceIdLabel.innerText   = faceIdVal;
+    if (faceIdLabel) faceIdLabel.innerText = faceIdVal;
     if (meshNameLabel) meshNameLabel.innerText = `Face_${faceIdVal}`;
 
     const paintModeElement = document.querySelector('input[name="paintMode"]:checked');
@@ -781,7 +1122,7 @@ function checkAndPaint(clientX, clientY) {
         saveHistory();
         paintChangedThisSession = true;
     }
-    
+
     if (paintMode === 'part') {
         applyColorToPart(targetMesh, colorPicker.value);
     } else {
@@ -824,22 +1165,85 @@ function applyColorToFaceIdInMesh(mesh, targetFaceId, hexColor) {
 
 
 ////////////////////////////////////////////////////////////
-// マウスオーバー時のハイライト処理 (カメラ操作時スキップ対応)
+// マウスオーバー時のハイライト処理 (エッジ・フェイス対応)
 ////////////////////////////////////////////////////////////
-
 function updateHighlight(clientX, clientY) {
+    
     if (!currentModel) return;
 
     const rect = canvas.getBoundingClientRect();
-    mouse.x =  ((clientX - rect.left) / rect.width)  * 2 - 1;
-    mouse.y = -((clientY - rect.top)  / rect.height) * 2 + 1;
-
+    mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     camera.updateProjectionMatrix();
     raycaster.setFromCamera(mouse, camera);
-    
+
+    // ── 📐 測定モード中のエッジ選択判定 ──
+    const selectModeElem = document.querySelector('input[name="selectionMode"]:checked');
+    const isEdgeSelection = selectModeElem && selectModeElem.value === 'edge';
+
+    if (isMeasureMode && isEdgeSelection) {
+        // 線を拾いやすくするために一時的にレイキャスターの閾値を設定（3D空間上の距離）
+        raycaster.params.Line = { threshold: 0.5 };
+        console.log("測定かつ")
+
+
+        const intersects = raycaster.intersectObjects(currentModel.children, true);
+        const edgeIntersect = intersects.find(hit => hit.object.isLineSegments && hit.object.name === 'edgeLines');
+
+        if (!edgeIntersect || (edgeIntersect.object.parent && edgeIntersect.object.parent.visible === false)) {
+            clearEdgeHighlight();
+            return;
+        }
+
+        const lineObj = edgeIntersect.object;
+        const edgeIdAttr = lineObj.geometry.attributes.edgeId;
+        const hitIndex = edgeIntersect.index; // ヒットしたセグメントの頂点インデックス
+
+        if (edgeIdAttr && hitIndex !== undefined) {
+            const edgeIdVal = Math.round(edgeIdAttr.getX(hitIndex));
+
+            // すでにハイライト済みならスキップ
+            if (hoveredEdgeId === edgeIdVal) return;
+            clearEdgeHighlight();
+            hoveredEdgeId = edgeIdVal;
+
+            // ── エッジを構成するすべての線分（点列）を取り出す ──
+            const positionAttr = lineObj.geometry.attributes.position;
+            const edgePositions = [];
+            const posCount = edgeIdAttr.count;
+            for (let i = 0; i < posCount; i++) {
+                if (Math.round(edgeIdAttr.getX(i)) === edgeIdVal) {
+                    edgePositions.push(
+                        positionAttr.getX(i),
+                        positionAttr.getY(i),
+                        positionAttr.getZ(i)
+                    );
+                }
+            }
+
+            // ── ホバーハイライト用の LineSegments を生成 ──
+            const hGeometry = new THREE.BufferGeometry();
+            hGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
+            
+            const hMaterial = new THREE.LineBasicMaterial({
+                color: 0x00ffff,      // シアン（目立つ蛍光水色）
+                linewidth: 3,         // 太線指定（環境により1固定の場合もあります）
+                depthTest: false      // モデルの裏に隠れず、最前面に強制描画
+            });
+
+            hoveredEdgeHighlight = new THREE.LineSegments(hGeometry, hMaterial);
+            hoveredEdgeHighlight.renderOrder = 999; // 描画順位を最上位に
+            scene.add(hoveredEdgeHighlight);
+        }
+        return; // エッジ判定を処理したため、面のハイライト処理はスキップ
+    }
+
+    // 面選択中の場合は、エッジハイライトをクリアして通常処理へ
+    clearEdgeHighlight();
+
+    // ── 📦 従来の面・パーツハイライト処理 ──
     const intersects = raycaster.intersectObjects(currentModel.children, true);
     const intersect = intersects.find(hit => hit.object.isMesh);
-    
     if (!intersect || (intersect.object.parent && intersect.object.parent.visible === false)) {
         clearHighlight();
         return;
@@ -849,23 +1253,20 @@ function updateHighlight(clientX, clientY) {
     if (hitTriangle === undefined) return;
 
     const targetMesh = intersect.object;
-    const geometry   = targetMesh.geometry;
-    const indexAttr  = geometry.index;
+    const geometry = targetMesh.geometry;
+    const indexAttr = geometry.index;
     const faceIdAttr = geometry.attributes.faceId;
-
     if (!indexAttr || !faceIdAttr) return;
 
     const vertexIndex = indexAttr.getX(hitTriangle * 3);
-    const faceIdVal   = Math.round(faceIdAttr.getX(vertexIndex));
+    const faceIdVal = Math.round(faceIdAttr.getX(vertexIndex));
 
     if (hoveredFaceId === faceIdVal) return;
     hoveredFaceId = faceIdVal;
-
     clearHighlight();
 
     const paintModeElement = document.querySelector('input[name="paintMode"]:checked');
     const paintMode = paintModeElement ? paintModeElement.value : 'face';
-
     let highlightGeom = new THREE.BufferGeometry();
 
     if (paintMode === 'part') {
@@ -876,14 +1277,14 @@ function updateHighlight(clientX, clientY) {
         const localIndices = [];
         const vertexMap = new Map();
         let localVertexCounter = 0;
-
         const count = indexAttr.count;
+
         for (let i = 0; i < count; i += 3) {
             const i0 = indexAttr.getX(i);
             const i1 = indexAttr.getX(i + 1);
             const i2 = indexAttr.getX(i + 2);
-
             const fId = Math.round(faceIdAttr.getX(i0));
+
             if (fId === faceIdVal) {
                 const gIdxs = [i0, i1, i2];
                 for (const gIdx of gIdxs) {
@@ -896,41 +1297,38 @@ function updateHighlight(clientX, clientY) {
                 }
             }
         }
-
         if (localPositions.length === 0) return;
         highlightGeom.setAttribute('position', new THREE.Float32BufferAttribute(localPositions, 3));
         highlightGeom.setIndex(localIndices);
     }
-    
+
     highlightGroup = new THREE.Group();
     highlightGroup.name = 'dynamicHighlightGroup';
-
-    const faceMat = new THREE.MeshBasicMaterial({
-        color: 0xff0000,
-        transparent: true,
-        opacity: 0.25,        
-        side: THREE.DoubleSide, 
-        depthTest: true,
-        depthWrite: false     
-    });
+    const faceMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthTest: true, depthWrite: false });
     const highlightMesh = new THREE.Mesh(highlightGeom, faceMat);
     highlightGroup.add(highlightMesh);
 
     const edgesGeom = new THREE.EdgesGeometry(highlightGeom, 24);
-    const edgesMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 1, depthTest: true });
+    const edgesMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 1 });
     const highlightEdgeMesh = new THREE.LineSegments(edgesGeom, edgesMat);
     highlightGroup.add(highlightEdgeMesh);
-
-    highlightGroup.position.copy(targetMesh.position);
-    highlightGroup.rotation.copy(targetMesh.rotation);
-    highlightGroup.scale.copy(targetMesh.scale);
-    
-    highlightGroup.scale.multiplyScalar(1.0005); 
 
     scene.add(highlightGroup);
 }
 
+// エッジハイライトを完全に消去するヘルパー関数（追加）
+function clearEdgeHighlight() {
+    if (hoveredEdgeHighlight) {
+        scene.remove(hoveredEdgeHighlight);
+        hoveredEdgeHighlight.geometry.dispose();
+        hoveredEdgeHighlight.material.dispose();
+        hoveredEdgeHighlight = null;
+    }
+    hoveredEdgeId = -1;
+}
+
 function clearHighlight() {
+    // 既存の面のクリア処理
     if (highlightGroup) {
         scene.remove(highlightGroup);
         highlightGroup.traverse((child) => {
@@ -940,6 +1338,9 @@ function clearHighlight() {
         highlightGroup = null;
     }
     hoveredFaceId = null;
+
+    // ── 💡 追加：エッジハイライトも同時にリセット ──
+    clearEdgeHighlight(); 
 }
 
 
@@ -948,11 +1349,16 @@ function clearHighlight() {
 ////////////////////////////////////////////////////////////
 
 canvas.addEventListener('pointerdown', (e) => {
-    // 距離測定モード有効時は、ペイント判定用のpointerdown発火をスキップ
-    if (isMeasureMode || isMemoMode) return;
-    //if (!isMeasureMode && !isMemoMode) return;
+    const selectModeElem = document.querySelector('input[name="selectMode"]:checked');
+    const currentMode = selectModeElem ? selectModeElem.value.toLowerCase() : 'face';
+
+    // 💡 修正：メモモード、または（測定モードかつエッジ選択以外）の時に return する
+    if (isMemoMode || (isMeasureMode && currentMode !== 'edge')) {
+        return;
+    }
 
     if (e.button === 0 && !e.shiftKey && !e.ctrlKey) {
+        
 
         isLeftMouseDown = true;
         isRotating      = false;
@@ -968,7 +1374,19 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
-    if (isMeasureMode || isMemoMode) return;
+    // 測定モード ON かつ edge 選択モード時 → エッジのホバーハイライトを更新
+    if (isMeasureMode) {
+        const activeModeEl = document.querySelector('input[name="selectMode"]:checked');
+        const selectMode = activeModeEl ? activeModeEl.value : 'vertex';
+        if (selectMode === 'edge') {
+            updateEdgeHoverHighlight(e.clientX, e.clientY);
+        } else {
+            clearEdgeHoverHighlight();
+        }
+        return;
+    }
+
+    if (isMemoMode) return;
 
     if (isLeftMouseDown && !isRotating) {
         controls.enabled = false;
@@ -1830,7 +2248,7 @@ canvas.addEventListener('mousedown', (e) => {
     raycaster.setFromCamera(mouse, camera);
     
     if (currentModel) {
-        // 1829〜1830行目を修正
+        
         const intersects = raycaster.intersectObjects(currentModel.children, true);
 
         // edgeモード時はLineSegmentsを優先、それ以外はMeshのみ
@@ -1839,13 +2257,31 @@ canvas.addEventListener('mousedown', (e) => {
 
         let intersect;
         if (selectMode === 'edge') {
-            // LineSegmentsを最優先、なければMeshにフォールバック
-            intersect = intersects.find(hit => hit.object.isLineSegments && hit.object.name === 'edgeLines')
-                    ?? intersects.find(hit => hit.object.isMesh);
+            console.log("セレクトモードがエッジでマウスダウン")
+            // edgeLines（LineSegments）を最優先。非表示パーツは除外。
+            const edgeHit = intersects.find(hit =>
+                hit.object.isLineSegments &&
+                hit.object.name === 'edgeLines' &&
+                hit.object.parent && hit.object.parent.visible !== false
+            );
+            if (edgeHit) {
+                intersect = edgeHit;
+                console.log(intersect,"1")
+            } else {
+                // edgeLinesにヒットしない場合はMeshにフォールバック
+                intersect = intersects.find(hit =>
+                    hit.object.isMesh &&
+                    hit.object.parent && hit.object.parent.visible !== false
+                );
+            }
         } else {
-            intersect = intersects.find(hit => hit.object.isMesh);
+            intersect = intersects.find(hit =>
+                hit.object.isMesh &&
+                hit.object.parent && hit.object.parent.visible !== false
+            );
         }
         if (intersect) {
+            console.log(intersect)
             if (isMeasureMode) {
                 handleMeasureClick(intersect);
             } else if (isMemoMode) {
@@ -1872,6 +2308,7 @@ if (btnToolMeasure) {
 ////////////////////////////////////////////////////////////
 // 1857行目
 function handleMeasureClick(intersect) {
+    console.log(intersect)
     if (!intersect || (!intersect.object.isMesh && !intersect.object.isLineSegments)) return;
     
     // 現在選択されている選択モードを取得
@@ -1913,17 +2350,199 @@ function handleMeasureClick(intersect) {
 
         let p1, p2;
 
-        // ── LineSegments（edgeLines）に直接ヒットした場合 ──
+        // ── LineSegments（B-Rep edgeLines）に直接ヒットした場合 ──
         if (intersect.object.isLineSegments) {
-            const lineGeo = intersect.object.geometry;
-            const posAttr = lineGeo.attributes.position;
-            const lineIdx = intersect.faceIndex; // 1プリミティブ = 2頂点
-            const i0 = lineIdx * 2;
-            const i1 = lineIdx * 2 + 1;
-            p1 = new THREE.Vector3().fromBufferAttribute(posAttr, i0)
-                     .applyMatrix4(intersect.object.matrixWorld);
-            p2 = new THREE.Vector3().fromBufferAttribute(posAttr, i1)
-                     .applyMatrix4(intersect.object.matrixWorld);
+            const lineGeo  = intersect.object.geometry;
+            const posAttr  = lineGeo.attributes.position;
+            const edgeIdAttr = lineGeo.attributes.edgeId;
+            //console.log("edgeIdAttr")
+            //console.log(edgeIdAttr)
+
+            if (edgeIdAttr) {
+                // ── B-Rep edgeId あり：同一エッジの全セグメントを収集してポリラインを再構築 ──
+                // ヒットセグメントの頂点インデックスからエッジIDを特定
+                const hitVtx = intersect.index;
+                const targetId = Math.round(edgeIdAttr.getX(hitVtx));
+                console.log("targetId")
+                console.log(targetId)
+                
+
+                // 同一 edgeId を持つ全頂点をセグメント順に列挙（頂点ペア単位で格納済み）
+                const polyPoints = [];
+                const vtxCount = posAttr.count;
+                for (let i = 0; i < vtxCount; i += 2) {
+                    if (Math.round(edgeIdAttr.getX(i)) === targetId) {
+                        polyPoints.push(
+                            new THREE.Vector3().fromBufferAttribute(posAttr, i)
+                                .applyMatrix4(intersect.object.matrixWorld),
+                            new THREE.Vector3().fromBufferAttribute(posAttr, i + 1)
+                                .applyMatrix4(intersect.object.matrixWorld)
+                        );
+                    }
+                }
+
+                if (polyPoints.length === 0) return;
+
+                // ポリライン全長を計算（各セグメントの長さの総和）
+                let totalLength = 0;
+                for (let i = 0; i < polyPoints.length; i += 2) {
+                    totalLength += polyPoints[i].distanceTo(polyPoints[i + 1]);
+                }
+
+                // 始点と終点を取得
+
+                p1 = polyPoints[0];
+                p2 = polyPoints[polyPoints.length - 1];
+
+                const chordLength = p1.distanceTo(p2); // 始点・終点間の直線距離
+                const deltaX = Math.abs(p2.x - p1.x);
+                const deltaY = Math.abs(p2.y - p1.y);
+                const deltaZ = Math.abs(p2.z - p1.z);
+
+                // ── 🎯 フィレット（円弧）および完全な円（正円）の幾何学計算 ──
+                let calculatedR = null;
+                let arcLength = chordLength; 
+                let isArc = false;
+                let isFullCircle = false; // 完全な円かどうかのフラグ
+                let circleCenter = null;  // 中心座標格納用
+
+                // 始点と終点がほぼ同じ位置（例: 0.01mm以下）の場合、閉じている円（正円）とみなす
+                if (polyPoints.length >= 4 && chordLength < 0.01) {
+                    // 頂点の全座標の平均から簡易的な中心（重心）を求める
+                    circleCenter = new THREE.Vector3(0, 0, 0);
+                    // 閉じている場合、最後の点は始点と同じなので最後の1点を除いて平均をとる
+                    const count = polyPoints.length - 1;
+                    for (let i = 0; i < count; i++) {
+                        circleCenter.add(polyPoints[i]);
+                    }
+                    circleCenter.divideScalar(count);
+
+                    // 中心から各頂点までの距離の平均を半径 R とする
+                    let totalRadius = 0;
+                    for (let i = 0; i < count; i++) {
+                        totalRadius += polyPoints[i].distanceTo(circleCenter);
+                    }
+                    calculatedR = totalRadius / count;
+
+                    // 完全な円の弧長 ＝ 円周 (2 * π * R)
+                    arcLength = 2 * Math.PI * calculatedR;
+                    isArc = true;
+                    isFullCircle = true;
+
+                } else if (polyPoints.length >= 4) {
+                    // ── 開いている円弧（フィレット）の計算 ──
+                    const midIndex = Math.floor(polyPoints.length / 2);
+                    const pMid = polyPoints[midIndex];
+
+                    const v1 = new THREE.Vector3().subVectors(pMid, p1);
+                    const v2 = new THREE.Vector3().subVectors(p2, p1);
+                    const cross = new THREE.Vector3().crossVectors(v1, v2);
+
+                    if (cross.length() > 0.001) {
+                        const len1 = v1.length();
+                        const len2 = v2.length();
+                        const lenSub = new THREE.Vector3().subVectors(p2, pMid).length();
+
+                        const area4 = 2 * cross.length();
+                        if (area4 > 0.001) {
+                            calculatedR = (len1 * len2 * lenSub) / area4;
+
+                            // 弦長から中心角 theta を計算
+                            const sinHalfTheta = Math.min(1.0, chordLength / (2 * calculatedR));
+                            const theta = 2 * Math.asin(sinHalfTheta);
+                            arcLength = calculatedR * theta;
+
+                            // 💡 【追加】3点 (p1, pMid, p2) から外接円の中心座標を数学的に計算
+                            // 三角形の平面上の外心（外接円の中心）のベクトル公式を使用
+                            const a2 = lenSub * lenSub;
+                            const b2 = len2 * len2;
+                            const c2 = len1 * len1;
+
+                            const w1 = a2 * (b2 + c2 - a2);
+                            const w2 = b2 * (c2 + a2 - b2);
+                            const w3 = c2 * (a2 + b2 - c2);
+
+                            circleCenter = new THREE.Vector3()
+                                .addScaledVector(p1, w1)
+                                .addScaledVector(pMid, w2)
+                                .addScaledVector(p2, w3)
+                                .divideScalar(w1 + w2 + w3);
+
+                            isArc = true;
+                        }
+                    }
+                }
+
+                // ── UIへの出力表示の更新 ──
+                if (measureText && measureXyzText) {
+                    measureLabel.style.display = 'block';
+
+                    if (isArc && calculatedR !== null) {
+                        if (isFullCircle && circleCenter) {
+                            // ① 完全な円（正円）の場合の表示
+                            measureText.innerHTML = `選択エッジの円周長: <span>${arcLength.toFixed(3)} mm</span>`;
+                            measureXyzText.innerHTML = `
+                                <span style="color:#2ecc71; font-weight:bold;">【正円検出】 半径: R ${calculatedR.toFixed(3)}</span> (直径 φ: ${(calculatedR * 2).toFixed(3)} mm)<br>
+                                <span style="color:#f1c40f;">中心座標: X: ${circleCenter.x.toFixed(3)} | Y: ${circleCenter.y.toFixed(3)} | Z: ${circleCenter.z.toFixed(3)}</span>
+                            `;
+                        } else {
+                            // ② 通常のフィレット円弧の場合の表示（中心座標を追加）
+                            measureText.innerHTML = `選択エッジの弧長: <span>${arcLength.toFixed(3)} mm</span>`;
+                            
+                            let centerCoordsHtml = '';
+                            if (circleCenter) {
+                                centerCoordsHtml = `<br><span style="color:#f1c40f;">推定中心座標: X: ${circleCenter.x.toFixed(3)} | Y: ${circleCenter.y.toFixed(3)} | Z: ${circleCenter.z.toFixed(3)}</span>`;
+                            }
+
+                            measureXyzText.innerHTML = `
+                                ΔX: ${deltaX.toFixed(3)} | ΔY: ${deltaY.toFixed(3)} | ΔZ: ${deltaZ.toFixed(3)}<br>
+                                <span style="color:#00bcff; font-weight:bold;">【円弧検出】 判定Rサイズ: R ${calculatedR.toFixed(3)}</span> (直径 φ: ${(calculatedR * 2).toFixed(3)} mm)${centerCoordsHtml}
+                            `;
+                        }
+                    } else {
+                        // ③ 直線エッジの場合の表示
+                        measureText.innerHTML = `選択エッジの長さ(直線): <span>${chordLength.toFixed(3)} mm</span>`;
+                        measureXyzText.innerHTML = `ΔX: ${deltaX.toFixed(3)} | ΔY: ${deltaY.toFixed(3)} | ΔZ: ${deltaZ.toFixed(3)}`;
+                    }
+                }
+
+                // ハイライト：B-Rep ポリライン全体をマーカー＋ラインで描画
+                clearMeasureVisuals();
+                createMarkerAt(p1);
+                createMarkerAt(p2);
+
+                // ポリライン全体をセグメント接続して描画
+                const allPts = [];
+                for (let i = 0; i < polyPoints.length; i += 2) {
+                    allPts.push(polyPoints[i], polyPoints[i + 1]);
+                }
+                const lineGeo2 = new THREE.BufferGeometry().setFromPoints(allPts);
+                const lineMat2 = new THREE.LineBasicMaterial({ color: 0x00ffcc, linewidth: 2, depthTest: false });
+                const measurePolyLine = new THREE.LineSegments(lineGeo2, lineMat2);
+                scene.add(measurePolyLine);
+                measureMarkers.push(measurePolyLine);
+                return; // 以降の共通処理はスキップ
+
+            } else {
+                // edgeId なし（フォールバック EdgesGeometry）：従来通り1セグメントの両端
+                let i0, i1;
+                if (lineGeo.index) {
+                    i0 = lineGeo.index.getX(intersect.faceIndex * 2);
+                    i1 = lineGeo.index.getX(intersect.faceIndex * 2 + 1);
+                } else {
+                    i0 = intersect.faceIndex * 2;
+                    i1 = intersect.faceIndex * 2 + 1;
+                }
+                if (i0 >= posAttr.count || i1 >= posAttr.count) {
+                    p1 = intersect.point.clone();
+                    p2 = intersect.point.clone();
+                } else {
+                    p1 = new THREE.Vector3().fromBufferAttribute(posAttr, i0)
+                             .applyMatrix4(intersect.object.matrixWorld);
+                    p2 = new THREE.Vector3().fromBufferAttribute(posAttr, i1)
+                             .applyMatrix4(intersect.object.matrixWorld);
+                }
+            }
 
         // ── フォールバック：メッシュ面の三角形辺から最近傍エッジを選ぶ ──
         } else {
@@ -1958,7 +2577,7 @@ function handleMeasureClick(intersect) {
             p2 = targetEdge.p2;
         }
 
-        // ── 共通：長さ・差分の計算と表示 ──
+        // ── 共通（フォールバック用）：長さ・差分の計算と表示 ──
         const edgeLength = p1.distanceTo(p2);
         const deltaX = Math.abs(p2.x - p1.x);
         const deltaY = Math.abs(p2.y - p1.y);
@@ -1969,8 +2588,7 @@ function handleMeasureClick(intersect) {
             measureText.innerHTML = `選択エッジの長さ: <span>${edgeLength.toFixed(3)} mm</span>`;
             measureXyzText.innerHTML = `
                 ΔX: ${deltaX.toFixed(3)} | ΔY: ${deltaY.toFixed(3)} | ΔZ: ${deltaZ.toFixed(3)}<br>
-                <span style="color:#778;">(円弧の場合の参考値)</span><br>
-                推定半径 R: ${(edgeLength * 0.6).toFixed(3)} (直径 φ: ${(edgeLength * 1.2).toFixed(3)})<br>
+                <span style="color:#778;">(マージンボックス)</span><br>
                 マージンボックス XYZ: [${deltaX.toFixed(2)}, ${deltaY.toFixed(2)}, ${deltaZ.toFixed(2)}]
             `;
         }
@@ -2014,6 +2632,7 @@ function handleMeasureClick(intersect) {
                 
                 // 体積：原点を基準とした四面体符号付き体積の総和
                 volume += vA.dot(vB.cross(vC)) / 6.0;
+                
             }
         }
         
@@ -2060,15 +2679,28 @@ function pushMeasurePoint(pt) {
     }
 }
 
-// 補助：マーカー作成
+// 補助：マーカー作成（ズームしても常に一定サイズ）
 function createMarkerAt(pos) {
-    const geo = new THREE.SphereGeometry(1.0, 16, 16);
-    const mat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, depthTest: false });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.copy(pos);
-    scene.add(mesh);
-    measureMarkers.push(mesh);
+    // 1. 点（1頂点）のジオメトリを作成
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([pos.x, pos.y, pos.z], 3));
+
+    // 2. マテリアルの設定
+    const mat = new THREE.PointsMaterial({
+        color: 0x00ffcc,
+        size: 10,               // 🚀 画面上での表示サイズ（ピクセル単位）。お好みで調整してください。
+        sizeAttenuation: false, // 👑 これを false にすることで、拡大縮小してもサイズを一定に保ちます
+        depthTest: false        // 既存のコード通り、モデルに隠れず最前面に描画
+    });
+
+    // 3. メッシュの代わりに Points オブジェクトを作成して追加
+    const points = new THREE.Points(geo, mat);
+    scene.add(points);
+    
+    // 既存の管理用配列に追加（一括削除などの処理はそのまま動作します）
+    measureMarkers.push(points);
 }
+
 
 // 補助：測定ライン描画
 function drawMeasureLine(p1, p2) {
@@ -2110,12 +2742,94 @@ function clearMeasureVisuals() {
 // 既存のクリア処理をオーバーライド・拡張
 function clearMeasure() {
     clearMeasureVisuals();
+    clearEdgeHoverHighlight();
     measurePoints = [];
     if (measureText) measureText.innerText = '---';
     if (measureXyzText) measureXyzText.innerText = '';
 }
 
+// ============================================================
+// エッジホバーハイライト（測定モード・edge選択モード専用）
+// B-Rep edgeId 属性を使い、同一エッジの全セグメントをまとめてハイライト
+// ============================================================
 
+function clearEdgeHoverHighlight() {
+    if (hoveredEdgeHighlight) {
+        scene.remove(hoveredEdgeHighlight);
+        hoveredEdgeHighlight.geometry.dispose();
+        hoveredEdgeHighlight.material.dispose();
+        hoveredEdgeHighlight = null;
+    }
+    hoveredEdgeId = -1;
+}
+
+function updateEdgeHoverHighlight(clientX, clientY) {
+    if (!currentModel) return;
+
+    const rect = canvas.getBoundingClientRect();
+    mouse.x =  ((clientX - rect.left) / rect.width)  * 2 - 1;
+    mouse.y = -((clientY - rect.top)  / rect.height) * 2 + 1;
+
+    camera.updateProjectionMatrix();
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersects = raycaster.intersectObjects(currentModel.children, true);
+    const edgeHit = intersects.find(hit =>
+        hit.object.isLineSegments &&
+        hit.object.name === 'edgeLines' &&
+        hit.object.parent && hit.object.parent.visible !== false
+    );
+
+    if (!edgeHit) { clearEdgeHoverHighlight(); return; }
+
+    const lineGeo    = edgeHit.object.geometry;
+    const posAttr    = lineGeo.attributes.position;
+    const edgeIdAttr = lineGeo.attributes.edgeId;
+    const hitIndex   = edgeHit.index; // 💡 ヒットしたセグメントの頂点インデックスを取得
+
+    let targetEdgeId;
+    if (edgeIdAttr && hitIndex !== undefined) {
+        // LineSegments のインデックス（hitIndex）から直接 edgeId を取得
+        targetEdgeId = Math.round(edgeIdAttr.getX(hitIndex));
+    } else {
+        // edgeId 属性がない場合のフォールバック（必要に応じて）
+        targetEdgeId = hitIndex !== undefined ? Math.floor(hitIndex / 2) : -1;
+    }
+
+    if (targetEdgeId === hoveredEdgeId) return;
+    clearEdgeHoverHighlight();
+    hoveredEdgeId = targetEdgeId;
+
+    const hlPoints = [];
+    if (edgeIdAttr) {
+        const vtxCount = posAttr.count;
+        for (let i = 0; i < vtxCount; i += 2) {
+            if (Math.round(edgeIdAttr.getX(i)) === targetEdgeId) {
+                hlPoints.push(
+                    new THREE.Vector3().fromBufferAttribute(posAttr, i)
+                        .applyMatrix4(edgeHit.object.matrixWorld),
+                    new THREE.Vector3().fromBufferAttribute(posAttr, i + 1)
+                        .applyMatrix4(edgeHit.object.matrixWorld)
+                );
+            }
+        }
+    } else {
+        const i0 = edgeHit.faceIndex * 2;
+        hlPoints.push(
+            new THREE.Vector3().fromBufferAttribute(posAttr, i0)
+                .applyMatrix4(edgeHit.object.matrixWorld),
+            new THREE.Vector3().fromBufferAttribute(posAttr, i0 + 1)
+                .applyMatrix4(edgeHit.object.matrixWorld)
+        );
+    }
+
+    if (hlPoints.length === 0) return;
+
+    const hlGeo = new THREE.BufferGeometry().setFromPoints(hlPoints);
+    const hlMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 3, depthTest: false });
+    hoveredEdgeHighlight = new THREE.LineSegments(hlGeo, hlMat);
+    scene.add(hoveredEdgeHighlight);
+}
 // ------------------------------------------------------------
 // 👑 ② 複数配置 ＆ 永続表示対応型 3D追従メモ帳ロジック
 // ------------------------------------------------------------
