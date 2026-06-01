@@ -1796,6 +1796,31 @@ if (resetViewButton) {
     });
 }
 
+////////////////////////////////////////////////////////////
+// 操作メニュー (Help Modal) の制御
+////////////////////////////////////////////////////////////
+const btnHelp       = document.getElementById('btn-help');
+const helpOverlay   = document.getElementById('help-overlay');
+const btnCloseHelp  = document.getElementById('btn-close-help');
+
+if (btnHelp && helpOverlay && btnCloseHelp) {
+    // 操作確認ボタンを押したときに表示
+    btnHelp.addEventListener('click', () => {
+        helpOverlay.classList.add('active');
+    });
+
+    // 閉じるボタンを押したときに非表示
+    btnCloseHelp.addEventListener('click', () => {
+        helpOverlay.classList.remove('active');
+    });
+
+    // 背景の黒い部分（オーバーレイ）をクリックしたときも閉じるようにする
+    helpOverlay.addEventListener('click', (e) => {
+        if (e.target === helpOverlay) {
+            helpOverlay.classList.remove('active');
+        }
+    });
+}
 
 ////////////////////////////////////////////////////////////
 // スクリーンショット機能

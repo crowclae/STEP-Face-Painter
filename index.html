@@ -234,7 +234,7 @@
         #right-sidebar {
             right: 16px;
             width: 260px;
-            top: 145px; /* 情報ボックスと被らないように配置 */
+            top: 185px; /* 情報ボックスと被らないように配置 */
             max-height: calc(100vh - 130px);
         }
 
@@ -459,14 +459,14 @@
             align-items: center;
             gap: 8px;
             background: rgba(255,255,255,0.03);
-            padding: 6px;
+            padding: 4px;
             border-radius: 6px;
             border: 1px solid #2a2a35;
         }
         .tag-color-indicator {
             width: 16px;
             height: 16px;
-            border-radius: 4px;
+            border-radius: 8px;
             flex-shrink: 0;
             cursor: pointer;
             border: 1px solid rgba(255,255,255,0.2);
@@ -484,6 +484,58 @@
         .tag-input:focus {
             border-color: #7dd3fc;
             outline: none;
+        }
+        /* 操作メニュー用スタイル */
+        .help-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            z-index: 10000; /* ランチャーより前面に表示 */
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        .help-overlay.active {
+            display: flex;
+        }
+        .help-window {
+            background: rgba(20, 20, 30, 0.96);
+            border: 2px solid #556;
+            border-radius: 16px;
+            padding: 24px;
+            width: 360px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+        }
+        .help-window h3 {
+            color: #7dd3fc;
+            font-size: 24px;
+            margin-bottom: 16px;
+            text-align: center;
+            letter-spacing: 0.05em;
+        }
+        .help-content {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .help-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #2d2d3d;
+            font-size: 20px;
+        }
+        .help-key {
+            color: #7dd3fc;
+            font-weight: bold;
+            background: rgba(125, 211, 252, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .help-desc {
+            color: #cbd5e1;
         }
     </style>
 </head>
@@ -587,6 +639,7 @@
     </div>
 
     <div id="info-box">
+    <button id="btn-help" class="action-btn" style="margin-top: 10px; background: #2563eb;">ℹ️ 操作確認</button>
         <div style="margin-bottom: 6px;">
             Face ID: <span id="faceId">—</span><br>
             Surface: <span id="meshName">—</span><br>
@@ -598,7 +651,7 @@
     </div>
 
     <button id="mode-badge" style="cursor: pointer; pointer-events: auto; transition: background 0.2s, border-color 0.2s;" title="クリックしてスクリーンショットを保存">
-    📸 SCREENSHOT — opencascade.js
+    📸 SCREENSHOT 
     </button>
 </div>
 
@@ -629,6 +682,32 @@
         </div>
     </div>
 </div>
+
+<div id="help-overlay" class="help-overlay">
+    <div class="help-window">
+        <h3>操作メニュー</h3>
+        <div class="help-content">
+            <div class="help-item">
+                <span class="help-key">左クリック</span>
+                <span class="help-desc">指定の色で色付け</span>
+            </div>
+            <div class="help-item">
+                <span class="help-key">右クリック</span>
+                <span class="help-desc">パン移動</span>
+            </div>
+            <div class="help-item">
+                <span class="help-key">マウスホイール</span>
+                <span class="help-desc">拡大・縮小</span>
+            </div>
+            <div class="help-item">
+                <span class="help-key">Shift + 左右クリック</span>
+                <span class="help-desc">カメラ回転</span>
+            </div>
+        </div>
+        <button id="btn-close-help" class="action-btn" style="margin-top: 16px;">閉じる</button>
+    </div>
+</div>
+
 
 <div id="pop-memo-window" style="position: absolute; background: rgba(20, 20, 30, 0.95); border: 1px solid #f1c40f; border-radius: 8px; padding: 8px; width: 220px; display: none; z-index: 500; box-shadow: 0 10px 25px rgba(0,0,0,0.6);">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; border-bottom: 1px solid #444; padding-bottom: 2px;">
