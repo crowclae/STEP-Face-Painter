@@ -55,7 +55,7 @@ Available to use right now in your browser via the URL below.
 
 ### Mouse Controls
 - **Left-click**: Color with selected color
-- **Right-click**: Pan
+- **Right-click**: Pan movement
 - **Scroll wheel**: Zoom in / out
 - **Shift + Left/Right-click**: Rotate camera
 
