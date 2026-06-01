@@ -351,19 +351,67 @@ let toggleMeasureMode = function (active) {
 
 
 ////////////////////////////////////////////////////////////
-// opencascade.js 初期化
+// opencascade.js 初期化 (分割WASMの結合読み込み)
 ////////////////////////////////////////////////////////////
 
 loading.style.display = 'block';
-loading.innerText = 'Loading opencascade.js WASM...';
+loading.innerText = 'Downloading WASM parts...';
 
-const oc = await import('./libs/opencascade/opencascade.full.js')
-    .then(({ default: OpenCascade }) => OpenCascade({
-        locateFile: (path) => `./libs/opencascade/${path}`
-    }));
+// 分割されたファイルのパスを指定
+const wasmParts = [
+    './libs/opencascade/opencascade.full.wasm.part1',
+    './libs/opencascade/opencascade.full.wasm.part2'
+];
 
-loading.innerText = 'Drop STEP File';
-console.log('OpenCascade.js Ready', oc);
+/**
+ * 分割されたWASMファイルを並行ダウンロードして結合する関数
+ */
+async function loadAndCombineWasmParts(urls) {
+    // 1. すべてのパーツを並行してfetch
+    const arrayBuffers = await Promise.all(
+        urls.map(url => fetch(url).then(res => {
+            if (!res.ok) throw new Error(`Failed to fetch: ${url}`);
+            return res.arrayBuffer();
+        }))
+    );
+
+    // 2. 合計サイズを計算
+    const totalLength = arrayBuffers.reduce((sum, buf) => sum + buf.byteLength, 0);
+    const combinedArray = new Uint8Array(totalLength);
+
+    // 3. 1つのUint8Arrayに結合
+    let offset = 0;
+    for (const buffer of arrayBuffers) {
+        combinedArray.set(new Uint8Array(buffer), offset);
+        offset += buffer.byteLength;
+    }
+
+    // 4. Emscriptenに渡すために ArrayBuffer 形式で返す
+    return combinedArray.buffer;
+}
+
+try {
+    // 結合処理の実行
+    const combinedBinary = await loadAndCombineWasmParts(wasmParts);
+    
+    loading.innerText = 'Initializing OpenCascade...';
+
+    // locateFileの代わりに `wasmBinary` オプションを使用してバイナリを直接注入
+    const oc = await import('./libs/opencascade/opencascade.full.js')
+        .then(({ default: OpenCascade }) => OpenCascade({
+            wasmBinary: combinedBinary
+        }));
+
+    loading.innerText = 'Drop STEP File';
+    console.log('OpenCascade.js Ready via split WASM modules', oc);
+    
+    // 以降のロジックのためにグローバルに登録（既存コードの挙動を維持）
+    window.oc = oc; 
+
+} catch (error) {
+    console.error('Failed to initialize OpenCascade:', error);
+    loading.innerText = 'Error loading WASM components.';
+}
 
 
 ////////////////////////////////////////////////////////////
