@@ -9,7 +9,7 @@
 以下のURLから今すぐブラウザ上で利用可能です。
 **一度アクセスしてページの読み込みが完了すれば、その後はインターネットを切断した完全オフライン環境でもそのまま使用できます。**
 
-👉 [STEP Face Painter を開く](https://crowclae.github.io/STEP-Face-Painter/)
+👉 [STEP Face Painter を開く](https://step-face-painter.crowclaw.workers.dev/)
 
 ---
 
@@ -17,6 +17,12 @@
 - **ローカル完結（安全なセキュリティ）**: 読み込んだSTEPデータは外部のサーバーに一切送信されず、ブラウザのメモリ内だけで完全に処理されます。機密性の高い設計データでも安心して現場で広げられます。
 - **摩擦ゼロの操作感**: 面倒なインストール、ユーザー登録、初期設定は一切不要です。
 - **正確なB-rep処理**: WebAssemblyベースの強固な3D CADカーネル（OpenCascade.js）を採用し、ポリゴン変換による劣化のない正確な面情報を保持します。
+
+### マウス操作一覧
+- **左クリック**：指定の色で色付け
+- **右クリック**：パン移動
+- **マウスホイール**：拡大・縮小
+- **Shift + 左右クリック**：カメラ回転
 
 ### 使い方（リポジトリをダウンロードして利用する場合）
 ネットワーク制限等により上記URLにアクセスできない環境では、本リポジトリを丸ごとダウンロードしてローカルで動かすことも可能です。必要なライブラリはすべて同梱されています。
@@ -46,6 +52,12 @@ Available to use right now in your browser via the URL below.
 - **Local execution (Secure)**: Loaded STEP data is never transmitted to external servers and is processed entirely within the browser's memory. You can safely handle highly confidential design data on-site.
 - **Zero-friction user experience**: No tedious installations, user registrations, or initial setups are required at all.
 - **Accurate B-rep processing**: Employs a robust WebAssembly-based 3D CAD kernel (OpenCascade.js) to maintain accurate face information without the geometric degradation associated with polygon conversion.
+
+### Mouse Controls
+- **Left-click**: Color with selected color
+- **Right-click**: Pan
+- **Scroll wheel**: Zoom in / out
+- **Shift + Left/Right-click**: Rotate camera
 
 ### How to Use (When Downloading the Repository)
 In environments where you cannot access the URL above due to network restrictions, you can download the entire repository and run it locally. All necessary libraries are bundled within the package.
