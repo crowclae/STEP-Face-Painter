@@ -14,7 +14,6 @@
 ---
 
 ### 主な特徴
-- **キャッシュによるオフライン動作**: オンラインページ（GitHub Pages）に一度アクセスすれば、Service Workerの機能により、次回からはネット環境がなくてもブラウザからそのまま起動・利用できます。
 - **ローカル完結（安全なセキュリティ）**: 読み込んだSTEPデータは外部のサーバーに一切送信されず、ブラウザのメモリ内だけで完全に処理されます。機密性の高い設計データでも安心して現場で広げられます。
 - **摩擦ゼロの操作感**: 面倒なインストール、ユーザー登録、初期設定は一切不要です。
 - **正確なB-rep処理**: WebAssemblyベースの強固な3D CADカーネル（OpenCascade.js）を採用し、ポリゴン変換による劣化のない正確な面情報を保持します。
@@ -44,7 +43,6 @@ Available to use right now in your browser via the URL below.
 ---
 
 ### Key Features
-- **Offline operation via caching**: Once you visit the online page (GitHub Pages), the Service Worker feature allows you to launch and use the application directly from your browser without an internet connection thereafter.
 - **Local execution (Secure)**: Loaded STEP data is never transmitted to external servers and is processed entirely within the browser's memory. You can safely handle highly confidential design data on-site.
 - **Zero-friction user experience**: No tedious installations, user registrations, or initial setups are required at all.
 - **Accurate B-rep processing**: Employs a robust WebAssembly-based 3D CAD kernel (OpenCascade.js) to maintain accurate face information without the geometric degradation associated with polygon conversion.
