@@ -764,6 +764,9 @@ async function loadStepFile(file) {
                 vertexColors: true,
                 metalness: 0.05,
                 roughness: 0.65,
+                polygonOffset: true,
+                polygonOffsetFactor: 1,
+                polygonOffsetUnits: 1
             });
 
             const mesh = new THREE.Mesh(geometry, material);
