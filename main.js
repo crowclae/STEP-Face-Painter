@@ -278,11 +278,78 @@ const controls = new TrackballControls(camera, renderer.domElement);
 controls.staticMoving = true;
 controls.noRotate = false;
 controls.noZoom   = false;
-controls.noPan    = false;
+controls.noPan = true;
 // マウス割り当て：左＝色付け専用（カメラ操作なし） / 右＝パン / Shift+右＝回転 / 中＝ズーム
 // 左ボタン(0)はどの用途にも割り当てず(-1)、常にペイント専用にする
-controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+controls.mouseButtons = {
+    LEFT: -1,
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: -1
+};
+////////////////////////////////////////////////////////////
+// Custom Pan (CADライク)
+////////////////////////////////////////////////////////////
 
+let isPanning = false;
+const lastPanPos = new THREE.Vector2();
+
+window.addEventListener('pointerdown', (e) => {
+
+    // Shift+右はTrackballControlsの回転
+    if (e.target !== canvas) return;
+
+    if (e.button === 2 && !e.shiftKey) {
+
+        isPanning = true;
+        lastPanPos.set(e.clientX, e.clientY);
+
+        // TrackballControlsへイベントを渡さない
+        e.preventDefault();
+        e.stopPropagation();
+    }
+
+}, true);
+
+
+window.addEventListener('pointermove', (e) => {
+
+    if (!isPanning) return;
+
+    const dx = e.clientX - lastPanPos.x;
+    const dy = e.clientY - lastPanPos.y;
+
+    lastPanPos.set(e.clientX, e.clientY);
+
+    // OrthographicCameraではズーム値のみ考慮
+    const worldPerPixel =
+        (camera.top - camera.bottom) /
+        camera.zoom /
+        renderer.domElement.clientHeight;
+
+    const right = new THREE.Vector3();
+    const up = camera.up.clone().normalize();
+    const forward = new THREE.Vector3();
+
+    camera.getWorldDirection(forward);
+
+    right.crossVectors(forward, up).normalize();
+
+    const move = new THREE.Vector3();
+
+    move.addScaledVector(right, -dx * worldPerPixel);
+    move.addScaledVector(up, dy * worldPerPixel);
+
+    camera.position.add(move);
+    controls.target.add(move);
+
+    controls.update();
+
+}, true);
+
+
+window.addEventListener('pointerup', () => {
+    isPanning = false;
+});
 // Shift+右クリックのときだけ「回転」に切り替える。
 // TrackballControls内部は button番号とmouseButtons.LEFT/MIDDLE/RIGHTの値が一致した方を
 // ROTATE/ZOOM/PANに割り当てる仕組みなので、Shiftが押されていれば右ボタン(2)の値を
