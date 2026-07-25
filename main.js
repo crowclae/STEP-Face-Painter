@@ -19,7 +19,7 @@
 ////////////////////////////////////////////////////////////
 
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js';
 
 
 ////////////////////////////////////////////////////////////
@@ -272,9 +272,27 @@ renderer.localClippingEnabled = true;
 // Controls
 ////////////////////////////////////////////////////////////
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.2; // デフォルト値。数値を大きくするとピタッと止まり、小さくすると長く滑ります。
+const controls = new TrackballControls(camera, renderer.domElement);
+// staticMoving = true にすることで慣性(遅延)を無くし、マウスの動きに1:1で追従させる
+// (false のままだと dynamicDampingFactor による「滑る」演出が入り、動きが遅れて感じられる)
+controls.staticMoving = true;
+controls.noRotate = false;
+controls.noZoom   = false;
+controls.noPan    = false;
+// マウス割り当て：左＝色付け専用（カメラ操作なし） / 右＝パン / Shift+右＝回転 / 中＝ズーム
+// 左ボタン(0)はどの用途にも割り当てず(-1)、常にペイント専用にする
+controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+
+// Shift+右クリックのときだけ「回転」に切り替える。
+// TrackballControls内部は button番号とmouseButtons.LEFT/MIDDLE/RIGHTの値が一致した方を
+// ROTATE/ZOOM/PANに割り当てる仕組みなので、Shiftが押されていれば右ボタン(2)の値を
+// 一時的にLEFT側へ入れてROTATE扱いにする（LEFT側の判定が switch 内で先に評価されるため）。
+// window側でcapture:trueにより、TrackballControls自身のpointerdown処理より必ず先に実行される。
+window.addEventListener('pointerdown', (e) => {
+    if (e.target === canvas && e.button === 2) {
+        controls.mouseButtons.LEFT = e.shiftKey ? THREE.MOUSE.RIGHT : -1;
+    }
+}, { capture: true });
 
 ////////////////////////////////////////////////////////////
 // Lights
@@ -764,9 +782,6 @@ async function loadStepFile(file) {
                 vertexColors: true,
                 metalness: 0.05,
                 roughness: 0.65,
-                polygonOffset: true,
-                polygonOffsetFactor: 1,
-                polygonOffsetUnits: 1
             });
 
             const mesh = new THREE.Mesh(geometry, material);
@@ -1789,7 +1804,8 @@ function triggerAutoFit() {
     
     camera.updateProjectionMatrix();
     controls.update();
-    controls.saveState(); 
+    // 注: TrackballControls には saveState() が無いため削除。
+    // (controls.reset() はこのアプリでは呼ばれていないため、機能への影響はありません)
 }
 
 if (resetViewButton) {
@@ -1987,6 +2003,7 @@ window.addEventListener('resize', () => {
     
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
+    controls.handleResize(); // TrackballControls は画面サイズをキャッシュしているため必須
 });
 // ============================================================
 // 👑 拡張機能用：追加ステート（複数メモ・永続管理化）
@@ -2126,8 +2143,9 @@ canvas.addEventListener('touchstart', (e) => {
             // A. モデルの上でタッチ開始 → 「タップで色付け / スワイプで連続色付け」モード
             isTouchingModel = true;
             
-            // OrbitControlsが勝手にカメラを回転させないように一時ロック
-            controls.enableRotate = false;
+            // TrackballControlsが勝手にカメラを回転させないように一時ロック
+            // (enableRotate/enablePan は OrbitControls 専用のため noRotate/noPan で代替)
+            controls.noRotate = true;
             
             // 即座に最初の1点をペイント（タップ色付け対応）
             e.stopPropagation();
@@ -2142,23 +2160,18 @@ canvas.addEventListener('touchstart', (e) => {
                 handleSinglePaint(intersect);
             }
         } else {
-            // B. 何もない空間でタッチ開始 → 「パン移動（移動中は色付けしない）」
+            // B. 何もない空間でタッチ開始
+            // TrackballControls では1本指の割り当てを個別に「パン」へ切り替えることができず、
+            // 1本指＝回転 / 2本指以上＝ズーム＋パン、という仕様に固定されています（トラックボール式の標準挙動）。
+            // そのため、ここでは何もない空間の1本指タッチは素直にTrackballControls任せの回転として扱います。
             isTouchingModel = false;
-            controls.enableRotate = false; // 1本指での回転を禁止
-            controls.enablePan = true;     // 1本指でのパンを許可
-            
-            // OrbitControlsの内部ステートを一時的に「1本指＝パン移動」に書き換える
-            controls.touches.ONE = THREE.TOUCH.PAN;
+            controls.noRotate = false;
         }
     } else if (e.touches.length === 2) {
-        // 2本指タッチの場合 → 「回転、ズーム（ピンチイン・アウト）」
+        // 2本指タッチの場合 → TrackballControlsが自動でズーム＋パンを処理
         isTouchingModel = false;
-        controls.enableRotate = true;
-        controls.enablePan = true;
-        
-        // OrbitControlsの標準挙動（2本指＝回転、ピンチ＝ズーム）に戻す
-        controls.touches.ONE = THREE.TOUCH.ROTATE;
-        controls.touches.TWO = THREE.TOUCH.DOLLY_PAN;
+        controls.noRotate = false;
+        controls.noPan    = false;
     }
 }, { passive: false });
 
@@ -2188,14 +2201,10 @@ canvas.addEventListener('touchmove', (e) => {
 
 // --- ③ タッチ終了 (touchend) ---
 canvas.addEventListener('touchend', (e) => {
-    // 操作が終わったら、OrbitControlsの挙動をPC・マウス用のデフォルト設定に綺麗にリセット
+    // 操作が終わったら、TrackballControlsの挙動をデフォルト設定に綺麗にリセット
     isTouchingModel = false;
-    controls.enableRotate = true;
-    controls.enablePan = true;
-    
-    // OrbitControlsのデフォルトのタッチ割り当てに戻す
-    controls.touches.ONE = THREE.TOUCH.ROTATE;
-    controls.touches.TWO = THREE.TOUCH.DOLLY_PAN;
+    controls.noRotate = false;
+    controls.noPan    = false;
 });
 
 
